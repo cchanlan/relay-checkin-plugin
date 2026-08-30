@@ -113,7 +113,15 @@ async function turnstileFallback(account, adapter, checkinPath = adapter.checkin
   }
   const parsed = parseCheckinResult(res.status, res.json, res)
   if (!parsed.ok && parsed.validation === 'turnstile') {
-    parsed.msg = `${parsed.msg}（浏览器方案已重试，站点可能要求交互式验证）`
+    // 走到这里说明 Cloudflare 已经签发了 token、请求也发出去了（res.status 是站点的回复），
+    // 站点却仍判验证不通过。实测最常见的原因是本机出口 IP 被判成高风险：数据中心 IP
+    // 拿到的 token 在站点侧校验一律不通过，同一套代码换成非数据中心出口后立刻放行。
+    // 这种情况下手动点验证同样过不去，所以不要再把用户引向交互验证。
+    const detail = res.json?.message || res.json?.msg || ''
+    logger.warn(`[relay-checkin-plugin] ${account.name} 已提交 Turnstile 凭据但站点判定失败`
+      + `（HTTP ${res.status}${detail ? `｜${detail}` : ''}）：多半是本机出口 IP 被判成高风险，`
+      + '在 proxy.url 配置一个非数据中心出口后重试即可；站点的 site key 与 secret 不配对也是同样表现')
+    parsed.msg = `${parsed.msg}（已提交验证凭据但站点未通过，请检查出口 IP 或配置 proxy.url）`
   }
   return parsed
 }
