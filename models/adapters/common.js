@@ -183,6 +183,19 @@ function responseSetCookies(headers) {
 }
 
 /**
+ * 阿里云 WAF 的拦截页：HTTP 仍是 200、Content-Type 是 text/html，
+ * 正文带 aliyun_waf_* 埋点或滑块验证组件。只看 status 会误判成「站点响应异常」，
+ * 因此单独识别，让上层能给出「站点挂了 WAF」而不是含糊的 HTTP 提示。
+ * @param {{json?: object|null, textSnippet?: string}} response request() 的返回值
+ */
+export function isAliyunWafPage(response) {
+  if (response?.json != null) return false
+  const snippet = String(response?.textSnippet || '')
+  if (!snippet) return false
+  return /aliyun_waf_(?:aa|bb)|aliyunCaptcha|acw_sc__v2|Access Verification/i.test(snippet)
+}
+
+/**
  * new-api 系 quota 换算美元（500000 quota = $1），兼容字符串数字；
  * 缺失值（null/undefined/空串）返回 null 而非 $0.00
  */
