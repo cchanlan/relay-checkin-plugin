@@ -122,7 +122,14 @@ async function ensureToken(account, { forceRenew = false, allowBrowser = true } 
   const renewed = await renewByRefreshToken(account)
   if (renewed.ok) return { ok: true, token: renewed.token }
 
-  // 2) 浏览器过码重新登录
+  // 2) 站点未开启验证码时用邮箱密码直接 HTTP 登录：省去浏览器过码的耗时与
+  // 页面槽位占用；allowBrowser=false 的短超时场景同样适用
+  if (hasLogin(account) && await captchaDisabled(account)) {
+    const direct = await loginByPassword(account)
+    if (direct.ok) return { ok: true, token: direct.token }
+  }
+
+  // 3) 浏览器过码重新登录
   if (!allowBrowser) {
     return { ok: false, msg: '凭据已过期，需重新登录（本次查询不启动浏览器，请执行 #中转签到 重新登录）' }
   }
@@ -167,6 +174,58 @@ async function renewByRefreshToken(account) {
   }
   logger.info(`[relay-checkin-plugin] ${account.name} refresh_token 已失效（${msg || `HTTP ${res.status}`}）`)
   return { ok: false, msg: msg || `刷新令牌无效 (HTTP ${res.status})` }
+}
+
+// 站点公共设置按 host 缓存：验证码开关很少变动，避免每次登录都多一次请求
+const captchaFlagCache = new Map()
+
+/**
+ * 站点是否三种验证码全部关闭。全部关闭时可直接 HTTP 登录，无需浏览器过码。
+ * 读取失败按「可能需要验证码」处理，仍走浏览器路径，避免误判导致无法登录。
+ */
+async function captchaDisabled(account) {
+  const host = hostOf(account)
+  if (captchaFlagCache.has(host)) return captchaFlagCache.get(host)
+  let disabled = false
+  try {
+    const res = await request(apiUrl(account, '/settings/public'))
+    const data = res.json?.data
+    // 以字段存在为准而非仅看 HTTP 200：非 Sub2API 站点也可能在该路径返回其它内容
+    if (res.status === 200 && res.json?.code === 0 && data && 'turnstile_enabled' in data) {
+      disabled = data.turnstile_enabled !== true
+        && data.aliyun_captcha_enabled !== true
+        && data.tencent_captcha_enabled !== true
+    }
+  } catch {
+    disabled = false
+  }
+  captchaFlagCache.set(host, disabled)
+  return disabled
+}
+
+/**
+ * 邮箱密码直接 HTTP 登录。仅在 captchaDisabled 为真时调用；
+ * 若站点实际需要验证码或启用了两步验证，此处返回业务失败，由调用方回退浏览器路径。
+ *
+ * 成功响应有两种形状：凭据位于 data 内，或直接位于顶层。两者都需兼容。
+ */
+async function loginByPassword(account) {
+  const res = await request(apiUrl(account, '/auth/login'), {
+    method: 'POST',
+    body: { email: String(account.loginEmail || '').trim(), password: String(account.password || '') }
+  })
+  const json = res.json || {}
+  const failed = 'code' in json && json.code !== 0 && json.code !== '0'
+  const data = json.data && typeof json.data === 'object' ? json.data : json
+  if (!failed && data?.access_token) {
+    applyTokens(account, data)
+    if (data.user?.id != null) account.siteUserId = data.user.id
+    if (data.user?.username) account.username = data.user.username
+    return { ok: true, token: data.access_token }
+  }
+  const msg = json.message || json.msg || `HTTP ${res.status}`
+  logger.info(`[relay-checkin-plugin] ${account.name} HTTP 登录未成功（${msg}）`)
+  return { ok: false, msg }
 }
 
 /**

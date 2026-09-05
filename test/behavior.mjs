@@ -49,7 +49,8 @@ try {
   const cfgMod = await import('../models/config.js')
   const cfgNow = cfgMod.getConfig()
   cfgNow.security.allowedPrivateHosts = [
-    'agentrouter.org', 'newapi.test', 'n.com', 'v.com', 'x.com', 't.com', 'anyrouter.top', 's2.test', 's2v2.test'
+    'agentrouter.org', 'newapi.test', 'n.com', 'v.com', 'x.com', 't.com', 'anyrouter.top', 's2.test', 's2v2.test',
+    'nocap.test', 'nocap2.test', 'hascap.test', 'badcfg.test'
   ]
   // 同理，测试也不能受运行环境（data/config.yaml 或 config_default 模板）里的代理配置影响：
   // 命中 proxy.hosts 的站点会走 node:https + proxy agent，完全绕过上面的 mock fetch
@@ -342,6 +343,82 @@ try {
   await refreshBalances(entryS2)
   assert.equal(entryS2.accounts[0].lastBalance, '$1.00', '刷新失败应保留旧余额缓存')
   cfgNow.browser.enable = savedBrowserEnable
+
+  // ---- Sub2API：站点未开启验证码时应直接 HTTP 登录，不启动浏览器 ----
+  // 站点把三种验证码开关放在 /settings/public，适配器据此选择登录方式。
+  // 读取失败必须按「可能需要验证码」处理，否则会让需要过码的站点无法登录。
+  const capOffBody = {
+    code: 0,
+    data: { turnstile_enabled: false, aliyun_captcha_enabled: false, tencent_captcha_enabled: false }
+  }
+  const mkS2Login = host => ({
+    name: host, baseUrl: `https://${host}`, type: 'sub2api', authMode: 'email',
+    loginEmail: 'a@b.com', password: 'pw', token: '', accessToken: '', tokenExpiresAt: null
+  })
+
+  const loginBodies = []
+  routes = {
+    'GET https://nocap.test/api/v1/settings/public': { status: 200, body: capOffBody },
+    'POST https://nocap.test/api/v1/auth/login': opts => {
+      loginBodies.push(JSON.parse(opts.body))
+      return {
+        status: 200,
+        body: {
+          code: 0,
+          data: {
+            access_token: 'AT-H1', refresh_token: 'RT-H1', expires_in: 86400,
+            user: { id: 11, username: 'h11' }
+          }
+        }
+      }
+    }
+  }
+  const noCap = mkS2Login('nocap.test')
+  assert.equal((await sub2api.login(noCap)).ok, true, '验证码全部关闭时应直接 HTTP 登录成功')
+  assert.deepEqual(loginBodies, [{ email: 'a@b.com', password: 'pw' }], '登录只提交邮箱与密码')
+  assert.equal(noCap.accessToken, 'AT-H1')
+  assert.equal(noCap.token, 'RT-H1', 'refresh_token 必须写回，否则下轮仍需重新登录')
+  assert.equal(noCap.siteUserId, 11, '需回填站点用户 ID 用于去重')
+  assert.equal(noCap.username, 'h11')
+  assert.ok(Number(noCap.tokenExpiresAt) > Date.now())
+
+  // 部分版本把凭据放在响应顶层而非 data 内，两种形状都需兼容
+  routes = {
+    'GET https://nocap2.test/api/v1/settings/public': { status: 200, body: capOffBody },
+    'POST https://nocap2.test/api/v1/auth/login': {
+      status: 200,
+      body: { access_token: 'AT-H2', refresh_token: 'RT-H2', expires_in: 86400 }
+    }
+  }
+  const topLevel = mkS2Login('nocap2.test')
+  assert.equal((await sub2api.login(topLevel)).ok, true, '顶层凭据形状也应登录成功')
+  assert.equal(topLevel.accessToken, 'AT-H2')
+  assert.equal(topLevel.token, 'RT-H2')
+
+  // 站点开启 Turnstile：不得直接 HTTP 登录，必须回退浏览器路径
+  const savedBrowserEnable2 = cfgNow.browser.enable
+  cfgNow.browser.enable = false // 用「浏览器方案已关闭」的报错证明确实走到浏览器分支
+  routes = {
+    'GET https://hascap.test/api/v1/settings/public': {
+      status: 200,
+      body: { code: 0, data: { turnstile_enabled: true, aliyun_captcha_enabled: false, tencent_captcha_enabled: false } }
+    }
+  }
+  const hasCap = await sub2api.login(mkS2Login('hascap.test'))
+  assert.equal(hasCap.ok, false, '开启验证码且浏览器方案关闭时应失败')
+  assert.match(hasCap.msg, /人机验证/, '应落到浏览器过码分支而非直接 HTTP 登录')
+
+  // 设置接口异常：按「可能需要验证码」处理，不得乐观地直接登录
+  routes = {
+    'GET https://badcfg.test/api/v1/settings/public': { status: 500, body: null },
+    'POST https://badcfg.test/api/v1/auth/login': () => {
+      throw new Error('读取不到验证码设置时不应尝试直接 HTTP 登录')
+    }
+  }
+  const badCfg = await sub2api.login(mkS2Login('badcfg.test'))
+  assert.equal(badCfg.ok, false)
+  assert.match(badCfg.msg, /人机验证/, '读取不到设置应回退浏览器而非直接登录')
+  cfgNow.browser.enable = savedBrowserEnable2
 
   // 签到全链路：状态未签 → POST 领取 → 状态复核已签；奖励与余额都是站点直接给的美元
   let s2StatusCalls = 0
