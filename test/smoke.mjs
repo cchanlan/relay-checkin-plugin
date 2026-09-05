@@ -618,6 +618,17 @@ try {
   assert.equal(r.awardQuota, 100000)
   r = parseCheckinResult(200, { success: false, message: '今日已签到' })
   assert.deepEqual([r.ok, r.already], [true, true])
+  // 站点整体没开签到：记成成功态并覆盖状态文案，否则每轮都在报表里占一条执行异常
+  r = parseCheckinResult(200, { success: false, message: '签到功能未启用' })
+  assert.deepEqual([r.ok, r.already], [true, false], '站点没开签到不该记成执行失败')
+  assert.equal(r.statusTextOverride, '无需签到', '状态文案要说明是无需签到')
+  assert.equal(r.msg, '签到功能未启用', '原始文案保留在批注里说明原因')
+  assert.equal(parseCheckinResult(200, { success: false, message: '签到已关闭' }).ok, true)
+  assert.equal(parseCheckinResult(200, { success: false, message: 'Check-in is disabled' }).ok, true)
+  r = parseCheckinResult(200, { success: false, message: '余额不足' })
+  assert.equal(r.ok, false, '普通失败仍要记成失败')
+  assert.equal(r.statusTextOverride, undefined, '普通失败不得覆盖状态文案')
+
   r = parseCheckinResult(200, { success: false, message: 'Turnstile token 为空' })
   assert.match(r.msg, /Turnstile/)
   assert.equal(classifyValidation({ message: '需要完成安全验证' }), 'pow')
