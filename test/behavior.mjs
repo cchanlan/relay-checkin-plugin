@@ -50,7 +50,8 @@ try {
   const cfgNow = cfgMod.getConfig()
   cfgNow.security.allowedPrivateHosts = [
     'agentrouter.org', 'newapi.test', 'n.com', 'v.com', 'x.com', 't.com', 'anyrouter.top', 's2.test', 's2v2.test',
-    'nocap.test', 'nocap2.test', 'hascap.test', 'badcfg.test', 'flaky.test'
+    'nocap.test', 'nocap2.test', 'hascap.test', 'badcfg.test', 'flaky.test',
+    'tbe.test', 'tbedone.test', 'tbenowait.test'
   ]
   // 同理，测试也不能受运行环境（data/config.yaml 或 config_default 模板）里的代理配置影响：
   // 命中 proxy.hosts 的站点会走 node:https + proxy agent，完全绕过上面的 mock fetch
@@ -452,6 +453,76 @@ try {
     Date.now = realNow
   }
   cfgNow.browser.enable = savedBrowserEnable2
+
+  // ---- 3.9 Sub2API：赞助商签到（tbe）两段式 ----
+  // 这类站点没有 /checkin 与 /check-in，签到要先 begin 拿一次性 token，
+  // 等满站点声明的曝光秒数再 claim。等待必须遵守，提前提交会被判无效。
+  const tbeStatusBody = done => ({
+    code: 0,
+    data: {
+      config: { normal_checkin_enabled: true, sponsor_popup_seconds: 0 },
+      today: '2026-09-05',
+      normal_done: done,
+      recent_records: done
+        ? [{ checkin_type: 'normal', checkin_date: '2026-09-05T00:00:00Z', amount: 0.8634 }]
+        : []
+    }
+  })
+  const mkTbe = host => ({
+    name: host, baseUrl: `https://${host}`, type: 'sub2api', authMode: 'email',
+    loginEmail: 'a@b.com', password: 'pw', token: '', accessToken: 'AT-TBE',
+    tokenExpiresAt: Date.now() + 3600e3
+  })
+
+  // 未签：两代旧形态 404 后落到 tbe，begin → claim 走通
+  const tbeCalls = []
+  routes = {
+    'GET https://tbe.test/api/v1/checkin/status': { status: 404, body: null },
+    'GET https://tbe.test/api/v1/check-in/status': { status: 404, body: null },
+    'GET https://tbe.test/api/v1/tbe-sponsor-checkin/status': { status: 200, body: tbeStatusBody(false) },
+    'POST https://tbe.test/api/v1/tbe-sponsor-checkin/normal/begin': opts => {
+      tbeCalls.push(['begin', JSON.parse(opts.body)])
+      return { status: 200, body: { code: 0, data: { token: 'TK-1', wait_seconds: 0, sponsor_name: '登仙赞助站' } } }
+    },
+    'POST https://tbe.test/api/v1/tbe-sponsor-checkin/normal/claim': opts => {
+      tbeCalls.push(['claim', JSON.parse(opts.body)])
+      return { status: 200, body: { code: 0, data: { amount: 0.8634 } } }
+    }
+  }
+  const tbeRes = await sub2api.checkin(mkTbe('tbe.test'))
+  assert.equal(tbeRes.ok, true, '赞助商签到应成功')
+  assert.equal(tbeRes.already, false)
+  assert.equal(tbeRes.awardText, '$0.86', '奖励金额在 amount 字段')
+  assert.deepEqual(tbeCalls.map(c => c[0]), ['begin', 'claim'], '必须先 begin 再 claim')
+  assert.equal(tbeCalls[1][1].token, 'TK-1', 'claim 要带 begin 给的一次性 token')
+  assert.ok(tbeCalls[0][1].timezone, 'begin 要带时区，站点据此判断今天')
+
+  // 已签：状态里 normal_done=true，直接报已签并带上今日奖励，不应再调 begin
+  routes = {
+    'GET https://tbedone.test/api/v1/checkin/status': { status: 404, body: null },
+    'GET https://tbedone.test/api/v1/check-in/status': { status: 404, body: null },
+    'GET https://tbedone.test/api/v1/tbe-sponsor-checkin/status': { status: 200, body: tbeStatusBody(true) },
+    'POST https://tbedone.test/api/v1/tbe-sponsor-checkin/normal/begin': () => {
+      throw new Error('已签到时不应再调 begin')
+    }
+  }
+  const tbeDone = await sub2api.checkin(mkTbe('tbedone.test'))
+  assert.equal(tbeDone.already, true, '已签应识别为 already')
+  assert.equal(tbeDone.awardText, '$0.86', '已签时从 recent_records 取今日奖励')
+
+  // begin 返回 409 ALREADY_DONE（状态与实际不一致时的兜底）也算已签，不算失败
+  routes = {
+    'GET https://tbenowait.test/api/v1/checkin/status': { status: 404, body: null },
+    'GET https://tbenowait.test/api/v1/check-in/status': { status: 404, body: null },
+    'GET https://tbenowait.test/api/v1/tbe-sponsor-checkin/status': { status: 200, body: tbeStatusBody(false) },
+    'POST https://tbenowait.test/api/v1/tbe-sponsor-checkin/normal/begin': {
+      status: 409,
+      body: { code: 409, message: 'check-in already completed', reason: 'TBE_SPONSOR_CHECKIN_ALREADY_DONE' }
+    }
+  }
+  const tbeRace = await sub2api.checkin(mkTbe('tbenowait.test'))
+  assert.equal(tbeRace.ok, true, 'begin 报已签不应算失败')
+  assert.equal(tbeRace.already, true)
 
   // 签到全链路：状态未签 → POST 领取 → 状态复核已签；奖励与余额都是站点直接给的美元
   let s2StatusCalls = 0

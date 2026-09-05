@@ -36,7 +36,17 @@ const EXPIRY_SAFETY_MS = 5 * 60 * 1000
 // 探测顺序：新版在前。命中后按 host 缓存，避免每轮签到都白打一次 404
 const CHECKIN_SHAPES = [
   { name: 'v2', statusPath: '/checkin/status', attemptPath: '/checkin/attempt', claimPath: '/checkin' },
-  { name: 'v1', statusPath: '/check-in/status', attemptPath: '', claimPath: '/check-in' }
+  { name: 'v1', statusPath: '/check-in/status', attemptPath: '', claimPath: '/check-in' },
+  // 赞助商签到（tbe）：两段式，begin 拿 token 并声明曝光等待秒数，等满才能 claim。
+  // 状态字段与前两代完全不同，单独解析；放最后以免影响老站点的形态探测顺序。
+  {
+    name: 'tbe',
+    kind: 'tbe',
+    statusPath: '/tbe-sponsor-checkin/status',
+    beginPath: '/tbe-sponsor-checkin/normal/begin',
+    attemptPath: '',
+    claimPath: '/tbe-sponsor-checkin/normal/claim'
+  }
 ]
 const checkinShapeCache = new Map()
 
@@ -346,7 +356,8 @@ const adapter = {
         checkinShapeCache.set(host, shape)
         logger.info(`[relay-checkin-plugin] ${host} 使用 ${shape.name} 版签到接口（${API}${shape.statusPath}）`)
       }
-      return { ...parseCheckinStatus(res), shape }
+      const parsedStatus = shape.kind === 'tbe' ? parseTbeStatus(res) : parseCheckinStatus(res)
+      return { ...parsedStatus, shape }
     }
     return { supported: false }
   },
@@ -380,6 +391,7 @@ const adapter = {
     }
 
     const shape = status.shape || checkinShapeCache.get(hostOf(account)) || CHECKIN_SHAPES[1]
+    if (shape.kind === 'tbe') return await tbeCheckin(account, shape, status)
     // 新版是三步：attempt 换 attempt_id → 过码 → 带 attempt_id + captcha_token 提交。
     // attempt 自带 expires_at 且服务端会校验 IP/上下文，所以取到就要尽快过码提交。
     let attemptId = ''
@@ -499,11 +511,91 @@ export function parseSub2apiCheckin(res) {
     confirmed: true,
     awardText: usd(data?.reward_amount)
       ?? usd(data?.today_reward)
+      // 赞助商签到把发放金额放在 amount
+      ?? usd(data?.amount)
       ?? usd(data?.reward_template?.value)
       ?? null,
     balanceText: balanceText(data),
     msg: ''
   }
+}
+
+/**
+ * 解析赞助商签到（tbe）状态。与前两代没有共用字段：
+ * 是否已签看 normal_done，功能开关在 config.normal_checkin_enabled，
+ * 今日奖励只能从 recent_records 里按日期取，接口本身不返回余额。
+ */
+export function parseTbeStatus(res) {
+  const { ok, data, msg } = unwrap(res)
+  const checked = data?.normal_done
+  if (!ok || typeof checked !== 'boolean') {
+    return { supported: true, ok: false, msg: msg || `签到状态查询失败 (HTTP ${res.status})` }
+  }
+  const cfg = data.config || {}
+  const today = String(data.today || '').slice(0, 10)
+  const todayRecord = (Array.isArray(data.recent_records) ? data.recent_records : []).find(
+    record => record?.checkin_type === 'normal' && String(record?.checkin_date || '').slice(0, 10) === today
+  )
+  return {
+    supported: true,
+    ok: true,
+    checked,
+    enabled: cfg.normal_checkin_enabled !== false,
+    // 普通签到不过码；看广告那一路才要，插件不做
+    captchaRequired: false,
+    unsupportedCaptcha: '',
+    siteKey: '',
+    awardText: checked ? (usd(todayRecord?.amount) ?? null) : null,
+    // 该接口不返回余额，留空让执行器去 userInfo 取，避免显示成 '-'
+    balanceText: null,
+    waitSeconds: Number(cfg.sponsor_popup_seconds) || 0
+  }
+}
+
+/**
+ * 赞助商签到：begin 取一次性 token，按站点声明的曝光时长等待后再 claim。
+ * 等待是硬要求（前端同样是倒计时到 0 才放开领取按钮），提前提交会被判无效。
+ */
+async function tbeCheckin(account, shape, status) {
+  let timezone = 'Asia/Shanghai'
+  try {
+    timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || timezone
+  } catch {
+    // 取不到系统时区就用默认值，站点只用它判断"今天"
+  }
+  const begin = await authed(account, shape.beginPath, { method: 'POST', body: { timezone } })
+  if (begin.authFailed) return { ok: false, already: false, msg: begin.msg }
+  const parsedBegin = unwrap(begin)
+  if (!parsedBegin.ok) {
+    if (/ALREADY_DONE|already completed|already checked in/i.test(`${parsedBegin.reason} ${parsedBegin.msg}`)) {
+      return {
+        ok: true,
+        already: true,
+        confirmed: true,
+        awardText: status.awardText,
+        balanceText: status.balanceText
+      }
+    }
+    logger.warn(`[relay-checkin-plugin] ${account.name} 赞助签到开场失败`
+      + `（HTTP ${begin.status}${parsedBegin.reason ? `｜${parsedBegin.reason}` : ''}）`
+      + `${parsedBegin.msg ? `：${parsedBegin.msg}` : ''}`)
+    return { ok: false, already: false, msg: parsedBegin.msg || '签到没准备好呀，晚点再试试~' }
+  }
+  const token = parsedBegin.data?.token
+  if (!token) {
+    // 这一步的真实响应结构没有公开文档，缺字段时把原样内容记下来便于定位
+    logger.warn(`[relay-checkin-plugin] ${account.name} 赞助签到未返回凭证：`
+      + `${JSON.stringify(parsedBegin.data ?? null).slice(0, 200)}`)
+    return { ok: false, already: false, msg: '站点没给签到凭证呀，晚点再试试~' }
+  }
+  const declared = Number(parsedBegin.data.wait_seconds)
+  const waitSec = Number.isFinite(declared) && declared > 0 ? declared : Number(status.waitSeconds) || 0
+  // 上限兜底：站点若声明一个离谱的时长，不能让签到任务一直挂着
+  const waitMs = Math.min(30, Math.max(0, Math.ceil(waitSec))) * 1000
+  if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs))
+  const res = await authed(account, shape.claimPath, { method: 'POST', body: { token, timezone } })
+  if (res.authFailed) return { ok: false, already: false, msg: res.msg }
+  return parseSub2apiCheckin(res)
 }
 
 /**
