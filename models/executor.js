@@ -22,6 +22,15 @@ function safePersist() {
 
 export const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
 
+/**
+ * 检查账号名是否命中跳过清单（纯函数便于测试）
+ * accountName 通常为站点 host；skipHosts 按包含匹配，规则与 proxy.hosts 相同
+ */
+export function matchSkipHost(accountName, skipHosts) {
+  if (!Array.isArray(skipHosts) || !skipHosts.length) return false
+  return skipHosts.some(h => h && String(accountName).includes(String(h)))
+}
+
 const STATUS_TEXT = { ok: '签到成功', already: '今日已签', unknown: '签到未确认', fail: '签到失败' }
 
 /**
@@ -222,6 +231,16 @@ async function readUserInfo(adapter, account) {
  * @returns {Promise<{name, status, statusText, award, balance, msg}>}
  */
 export async function checkinAccount(account) {
+  // 命中跳过清单时直接短路，不发起任何网络请求
+  if (matchSkipHost(account.name, getConfig().skip?.hosts)) {
+    logger.info(`[relay-checkin-plugin] ${account.name} 命中跳过清单，跳过签到`)
+    return finalizeCheckinResult(account, {
+      ok: true,
+      already: false,
+      statusTextOverride: '跳过签到',
+      msg: '不支持该站点'
+    }, {})
+  }
   const adapter = getAdapter(account.type)
   let r = null
   let beforeStatus = null

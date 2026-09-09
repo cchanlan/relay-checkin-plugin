@@ -92,3 +92,9 @@ proxy:
 
 # 群聊中使用 #中转添加 后，尝试撤回用户消息（令牌敏感），需机器人有管理员权限
 recallAdd: true
+
+# 签到跳过清单
+# 填入站点域名关键字（按包含匹配，与 proxy.hosts 规则相同）；命中的站点直接标记为「跳过签到」不发起请求
+# 例：['tabitoken.com', 'k40', 'example.com']
+skip:
+  hosts: []

@@ -84,7 +84,10 @@ export const DEFAULT_CONFIG = {
     hosts: ['anyrouter'],
     useForBrowser: true
   },
-  recallAdd: true
+  recallAdd: true,
+  skip: {
+    hosts: []
+  }
 }
 
 let configCache = null
