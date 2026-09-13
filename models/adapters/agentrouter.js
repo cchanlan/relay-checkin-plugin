@@ -1,4 +1,4 @@
-import { request, parseUserInfo, isAliyunWafPage } from './common.js'
+import { request, parseUserInfo, isAliyunWafPage, proxySetupHint } from './common.js'
 import { logger } from '../../host/index.js'
 
 /**
@@ -108,7 +108,7 @@ const adapter = {
       logger.warn(`[relay-checkin-plugin] ${account.baseUrl} 的用户接口被阿里云 WAF 拦下`
         + `（HTTP ${res.status}，返回滑块验证页）：这台机器过不去该站的滑动验证，`
         + '在 proxy.url 配置一个非数据中心出口后重试')
-      return { ok: false, already: false, msg: '站点已开启滑动验证，请主人配置 proxy.url 后重试' }
+      return { ok: false, already: false, msg: `站点已开启滑动验证，${proxySetupHint(res?.host || '')}` }
     }
     const info = parseUserInfo(res.json)
     if (!info.ok) return { ok: false, already: false, msg: info.msg || '登录信息验证失败，请重新绑定' }
@@ -164,7 +164,7 @@ export function loginError(status, json, response = null) {
   const msg = json?.message || json?.msg
   if (msg) return `登录失败：${msg}`
   // WAF 拦截页也是 HTTP 200，先认出来再谈状态码，否则用户只看到「响应异常」
-  if (isAliyunWafPage(response)) return '站点已开启滑动验证，请主人配置 proxy.url 后重试'
+  if (isAliyunWafPage(response)) return `站点已开启滑动验证，${proxySetupHint(response?.host || '')}`
   if (status === 401 || status === 403) return `登录失败：邮箱或密码无效 (HTTP ${status})`
   if (status === 404) return '该站点没有邮箱登录接口'
   return `登录响应异常 (HTTP ${status})`

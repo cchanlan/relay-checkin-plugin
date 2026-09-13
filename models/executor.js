@@ -1,5 +1,5 @@
 import { getAdapter } from './adapters/index.js'
-import { quotaToUsd, request, parseCheckinResult, classifyValidation, deriveAwardQuota } from './adapters/common.js'
+import { quotaToUsd, request, parseCheckinResult, classifyValidation, deriveAwardQuota, proxySetupHint, hostOf } from './adapters/common.js'
 import { powCheckin, turnstileCheckin } from './browser.js'
 import { ocrCaptcha } from './ocr.js'
 import { getConfig } from './config.js'
@@ -177,7 +177,7 @@ async function turnstileFallback(account, adapter, checkinPath = adapter.checkin
     logger.warn(`[relay-checkin-plugin] ${account.name} 已提交 Turnstile 凭据但站点判定失败`
       + `（HTTP ${res.status}${detail ? `｜${detail}` : ''}）：多半是本机出口 IP 被判成高风险，`
       + '在 proxy.url 配置一个非数据中心出口后重试即可；站点的 site key 与 secret 不配对也是同样表现')
-    parsed.msg = `${parsed.msg}（请主人设置 proxy.url 后重试）`
+    parsed.msg = `${parsed.msg}，${proxySetupHint(res?.host || hostOf(account))}`
   }
   return parsed
 }

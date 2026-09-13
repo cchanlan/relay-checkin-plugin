@@ -4,7 +4,7 @@ import crypto from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { dataPath, getConfig } from './config.js'
 import { logger } from '../host/index.js'
-import { proxyForHost } from './adapters/common.js'
+import { proxyForHost, proxySetupHint } from './adapters/common.js'
 import { assertSafeRequestUrl } from './url-security.js'
 import {
   POINTER_WINDOWS,
@@ -1766,13 +1766,13 @@ function detachedTurnstilePageScript(cfg) {
   else start()
 }
 
-function turnstileFailureMessage(result, timeoutSec, interactive = false) {
+function turnstileFailureMessage(result, timeoutSec, interactive = false, host = '') {
   // 内核过旧时不管失败在哪一步都是同一个结论，直接给出可执行的办法
   if (staleKernelNotice) return STALE_KERNEL_MESSAGE
   // 具体错误码、失败阶段、超时秒数一律只进日志：用户能做的动作只有换出口或等下一轮
   if (result?.reason === 'error-callback') {
     if (/^[36]\d{5}$/.test(result.errorCode || '')) {
-      return '人机验证没通过，请主人在配置里设置 proxy.url 后重试'
+      return `人机验证没通过，${proxySetupHint(host)}`
     }
     return '人机验证没通过，稍后再试'
   }
@@ -1938,12 +1938,12 @@ export async function dumpDetachedFailure(ws, host, display, diagnostic = {}) {
   }
 }
 
-function detachedResultToOutcome(result, timeoutSec) {
+function detachedResultToOutcome(result, timeoutSec, host = '') {
   if (result.turnstileError) {
     return {
       turnstileFailed: true,
       message: turnstileFailureMessage(
-        { reason: 'error-callback', errorCode: result.turnstileError }, timeoutSec, true
+        { reason: 'error-callback', errorCode: result.turnstileError }, timeoutSec, true, host
       ),
       detail: result
     }
@@ -2219,7 +2219,7 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
       if (state?.result) {
         logger.info(`[relay-checkin-plugin] ${host} 页面内验证流程结束: `
           + (state.log || []).map(item => (item.code ? `${item.step}(${item.code})` : item.step)).join(' → '))
-        return detachedResultToOutcome(state.result, timeoutSec)
+        return detachedResultToOutcome(state.result, timeoutSec, host)
       }
       // 读不到状态和「读到了但挑战还没结束」是两码事，日志里必须能分开：
       // 前者说明浏览器或注入脚本出了问题，后者只是还在等 Cloudflare
@@ -2276,7 +2276,7 @@ async function runTurnstileAttempt(account, { checkinPath, headers, validationHe
     if (!attempt.token) {
       return {
         turnstileFailed: true,
-        message: turnstileFailureMessage(attempt, timeoutSec, interactive),
+        message: turnstileFailureMessage(attempt, timeoutSec, interactive, host),
         detail: attempt
       }
     }

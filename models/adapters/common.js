@@ -25,6 +25,39 @@ export function proxyForHost(host, forBrowser = false) {
   return matchProxy(host, cfg)
 }
 
+/**
+ * 账号 baseUrl 的域名，取不到时原样返回（提示里点名站点用）
+ */
+export function hostOf(account) {
+  try { return new URL(account?.baseUrl).hostname } catch { return String(account?.baseUrl || '') }
+}
+
+/**
+ * 出口被站点判高风险时，按当前配置给出唯一那一步该做的事。
+ *
+ * proxy.hosts 非空时它是白名单（见 matchProxy），默认只放行 anyrouter / agentrouter。
+ * 所以「配了 proxy.url」不等于「这个站走了代理」：域名没进白名单的话该站仍是直连，
+ * 让用户去换代理是白折腾，真正缺的是把域名加进 proxy.hosts。三种局面各有各的动作，
+ * 不能共用一句话。
+ * @param {string} host 站点域名，留空时提示里写成「该站」
+ */
+export function proxySetupHint(host = '') {
+  const cfg = getConfig().proxy || {}
+  const hosts = (Array.isArray(cfg.hosts) ? cfg.hosts : []).filter(Boolean)
+  const named = String(host || '').trim()
+  const target = named ? `${named} ` : '该站 '
+  const panel = '（锅巴面板：中转站签到 → 代理设置）'
+  if (!cfg.url) {
+    const extra = hosts.length ? `，并把 ${target}加进 proxy.hosts` : ''
+    return `请主人在 proxy.url 填一个非机房的 http 代理${extra}后重试${panel}`
+  }
+  // 代理配了，但这个站没进白名单 —— 它压根没走代理，换代理不解决问题
+  if (hosts.length && !hosts.some(h => named && named.includes(String(h)))) {
+    return `请主人把 ${target}加进 proxy.hosts 后重试${panel}`
+  }
+  return `请主人把 proxy.url 换成另一个非机房的代理后重试${panel}`
+}
+
 let proxyAgentCache = null
 
 /**
@@ -151,6 +184,7 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
           timeoutMs: tMs,
           proxyUrl
         })
+        response.host = safeUrl.hostname
         logNonJsonResponse(normalizedMethod, targetUrl, response)
         return response
       } catch (err) {
@@ -183,6 +217,9 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
       const response = {
         status: res.status,
         json,
+        // 域名要跟着响应走：parseCheckinResult 只拿到 (status, json, meta)，
+        // 而「出口被封」这类结论必须点名域名才能把 proxy.hosts 那一步说清楚
+        host: safeUrl.hostname,
         contentType: String(res.headers?.get?.('content-type') || ''),
         textSnippet: json ? '' : text.slice(0, 512),
         bodyLength: text.length,
@@ -317,7 +354,8 @@ export function parseCheckinResult(status, json, meta = {}) {
       pow: '站点要求完成安全验证（POW），无法直接签到',
       captcha: '站点要求完成验证码/人机验证，无法直接签到',
       waf: '请求被站点 WAF/人机验证拦截',
-      cfBlock: '站点拦下了机器人所在的网络出口，请主人配置 proxy.url 后重试'
+      // meta 就是 request() 的响应对象，host 由它带下来（走代理和直连两条路都有）
+      cfBlock: `站点拦下了机器人所在的网络出口，${proxySetupHint(meta?.host || '')}`
     }[validation]
     return { ok: false, already: false, validation, msg: validationMessage }
   }
