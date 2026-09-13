@@ -33,7 +33,7 @@ const adapter = {
 
   async login(account) {
     if (!hasEmailLogin(account)) {
-      return { ok: false, already: false, msg: '缺少 AgentRouter 邮箱或站内密码' }
+      return { ok: false, already: false, msg: '请先补齐邮箱和站内密码' }
     }
 
     // 不携带旧 session，直接执行一次全新的邮箱登录。
@@ -93,7 +93,7 @@ const adapter = {
       ok: true,
       already: false,
       confirmed: false,
-      msg: '邮箱登录成功，但响应缺少 checked_in 字段，无法确认是否发放签到额度',
+      msg: '邮箱登录成功，但无法确认签到额度，请稍后重试',
       statusTextOverride: '登录成功·签到未确认'
     }
   },
@@ -108,15 +108,15 @@ const adapter = {
       logger.warn(`[relay-checkin-plugin] ${account.baseUrl} 的用户接口被阿里云 WAF 拦下`
         + `（HTTP ${res.status}，返回滑块验证页）：这台机器过不去该站的滑动验证，`
         + '在 proxy.url 配置一个非数据中心出口后重试')
-      return { ok: false, already: false, msg: '站点已开启滑动验证，无法查询余额，请配置 proxy.url 后重试' }
+      return { ok: false, already: false, msg: '站点已开启滑动验证，请主人配置 proxy.url 后重试' }
     }
     const info = parseUserInfo(res.json)
-    if (!info.ok) return { ok: false, already: false, msg: info.msg || 'Session 验证失败' }
+    if (!info.ok) return { ok: false, already: false, msg: info.msg || '登录信息验证失败，请重新绑定' }
     return {
       ok: true,
       already: false,
       confirmed: false,
-      msg: 'Session 只能查询余额，未执行邮箱重新登录，无法确认今日 $25 签到',
+      msg: '该绑定方式只能查询余额，无法确认今日签到',
       statusTextOverride: 'Session 有效·未重登',
       balanceText: info.balanceText,
       info
@@ -164,9 +164,9 @@ export function loginError(status, json, response = null) {
   const msg = json?.message || json?.msg
   if (msg) return `登录失败：${msg}`
   // WAF 拦截页也是 HTTP 200，先认出来再谈状态码，否则用户只看到「响应异常」
-  if (isAliyunWafPage(response)) return '站点已开启滑动验证，无法自动登录，请配置 proxy.url 后重试'
+  if (isAliyunWafPage(response)) return '站点已开启滑动验证，请主人配置 proxy.url 后重试'
   if (status === 401 || status === 403) return `登录失败：邮箱或密码无效 (HTTP ${status})`
-  if (status === 404) return '站点没有邮箱登录接口'
+  if (status === 404) return '该站点没有邮箱登录接口'
   return `登录响应异常 (HTTP ${status})`
 }
 

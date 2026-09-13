@@ -165,7 +165,7 @@ async function turnstileFallback(account, adapter, checkinPath = adapter.checkin
     siteKey
   })
   if (res.turnstileFailed) {
-    return { ok: false, already: false, msg: res.message || 'Turnstile 挑战未通过（站点可能要求交互验证）' }
+    return { ok: false, already: false, msg: res.message || '人机验证未通过，请稍后重试' }
   }
   const parsed = parseCheckinResult(res.status, res.json, res)
   if (!parsed.ok && parsed.validation === 'turnstile') {
@@ -177,7 +177,7 @@ async function turnstileFallback(account, adapter, checkinPath = adapter.checkin
     logger.warn(`[relay-checkin-plugin] ${account.name} 已提交 Turnstile 凭据但站点判定失败`
       + `（HTTP ${res.status}${detail ? `｜${detail}` : ''}）：多半是本机出口 IP 被判成高风险，`
       + '在 proxy.url 配置一个非数据中心出口后重试即可；站点的 site key 与 secret 不配对也是同样表现')
-    parsed.msg = `${parsed.msg}（验证过了但站点没认，多半是网络出口被判风险，请主人设置 proxy.url 后重试）`
+    parsed.msg = `${parsed.msg}（请主人设置 proxy.url 后重试）`
   }
   return parsed
 }
@@ -278,7 +278,7 @@ export async function checkinAccount(account) {
           try {
             r = await captchaFallback(account, adapter, browserCheckinPath)
           } catch (err) {
-            r = { ok: false, already: false, validation: 'captcha', msg: `验证码方案失败：${err?.message || err}` }
+            r = { ok: false, already: false, validation: 'captcha', msg: `验证码识别失败，请稍后重试` }
           }
         } else if (fallback) {
           if (fallback === 'pow') {
@@ -286,7 +286,7 @@ export async function checkinAccount(account) {
             try {
               r = await powFallback(account, adapter, browserCheckinPath)
             } catch (err) {
-              r = { ok: false, already: false, validation: 'pow', msg: `POW 浏览器方案失败：${err?.message || err}` }
+              r = { ok: false, already: false, validation: 'pow', msg: `安全验证失败，请稍后重试` }
             }
           } else if (fallback === 'cfBlock') {
             // 出口被站点的 Cloudflare 防火墙规则封了，真实浏览器同样是那张拦截页，

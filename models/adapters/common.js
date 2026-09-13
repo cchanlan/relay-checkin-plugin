@@ -37,11 +37,11 @@ async function getProxyAgent(proxyUrl) {
   try {
     mod = await import('https-proxy-agent')
   } catch {
-    throw new Error('未找到 https-proxy-agent 依赖（Yunzai 自带），代理不可用')
+    throw new Error('代理不可用，请主人检查配置里的 proxy.url')
   }
   const HttpsProxyAgent = mod.HttpsProxyAgent ?? mod.default
   if (typeof HttpsProxyAgent !== 'function') {
-    throw new Error('https-proxy-agent 版本不兼容，代理不可用')
+    throw new Error('代理不可用，请主人检查配置里的 proxy.url')
   }
   proxyAgentCache = { url: proxyUrl, agent: new HttpsProxyAgent(proxyUrl) }
   return proxyAgentCache.agent
@@ -79,7 +79,7 @@ async function proxiedRequest(url, { method, headers, body, timeoutMs, proxyUrl 
         })
       })
     })
-    const timer = setTimeout(() => req.destroy(new Error('代理请求超时（代理隧道无响应）')), timeoutMs)
+    const timer = setTimeout(() => req.destroy(new Error('代理请求超时，请稍后重试')), timeoutMs)
     req.on('error', err => {
       clearTimeout(timer)
       reject(err)
@@ -192,7 +192,7 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
       return response
     } catch (err) {
       lastErr = timedOut
-        ? new Error(`请求超时（${tMs / 1000} 秒）`)
+        ? new Error(`请求超时，请稍后重试`)
         : err
     } finally {
       clearTimeout(timer)
@@ -260,7 +260,7 @@ export function quotaToUsd(quota) {
  */
 export function parseUserInfo(json) {
   if (!json?.success || !json?.data) {
-    return { ok: false, msg: json?.message || '获取用户信息失败' }
+    return { ok: false, msg: json?.message || '获取用户信息失败，请稍后重试' }
   }
   const d = json.data
   return {

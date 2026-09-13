@@ -101,7 +101,7 @@ export function ocrCaptcha(image, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
       // 走进程树是因为 Windows 上解释器可能是 py launcher，它真正干活的
       // python.exe 是子进程，只杀 launcher 会留下一个吃着内存的孤儿
       killProcessTree(child.pid)
-      fail(new Error(`OCR 超时（${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} 秒` : `${timeoutMs} 毫秒`}未返回，已终止 python 进程）`))
+      fail(new Error('验证码识别超时，请稍后重试'))
     }, timeoutMs)
     timer.unref?.()
 
@@ -116,7 +116,7 @@ export function ocrCaptcha(image, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
     })
     child.on('close', code => {
       if (code === 0) return done(out.trim())
-      fail(new Error(`OCR 退出码 ${code}: ${describeStderr(err, python)}`))
+      fail(new Error(`验证码识别失败，请稍后重试`))
     })
     child.stdin.on('error', () => child.kill())
     child.stdin.end(image)

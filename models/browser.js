@@ -118,7 +118,7 @@ async function getPuppeteer() {
   try {
     return (await import('puppeteer')).default
   } catch {
-    throw new Error('未找到 puppeteer 依赖，无法使用浏览器方案')
+    throw new Error('浏览器方案不可用，请主人检查依赖')
   }
 }
 
@@ -509,7 +509,7 @@ function checkBreaker(host) {
   if (!b?.until) return
   if (Date.now() < b.until) {
     const mins = Math.ceil((b.until - Date.now()) / 60000)
-    throw new Error(`该站点浏览器方案连续失败已暂停，约 ${mins} 分钟后自动恢复`)
+    throw new Error(`该站点连续失败已暂停，约 ${mins} 分钟后自动恢复`)
   }
   breaker.delete(host)
 }
@@ -1017,7 +1017,7 @@ export async function powCheckin(account, { checkinPath, headers = {}, validatio
         let nonce = 0
         let hash = ''
         while (!hash) {
-          if (Date.now() >= deadline) return { powFailed: true, message: `POW 计算超过 ${timeoutMs / 1000} 秒` }
+          if (Date.now() >= deadline) return { powFailed: true, message: `安全验证超时，请稍后重试` }
           const hashes = await Promise.all(Array.from({ length: batchSize }, (_, offset) => hashText(challenge + (nonce + offset))))
           const hit = hashes.findIndex(value => value.startsWith(prefix))
           if (hit >= 0) {
@@ -1133,7 +1133,7 @@ export async function navigateForTurnstile(page, targetUrl) {
     }
 
     if (/timeout|超时/i.test(detail)) {
-      throw new Error('打开站点页面超时：30 秒内未加载出可用页面，请检查站点或代理网络')
+      throw new Error('打开站点页面超时，请检查站点或代理网络')
     }
     throw new Error(`打开站点页面失败：${detail}`)
   }
@@ -1772,11 +1772,11 @@ function turnstileFailureMessage(result, timeoutSec, interactive = false) {
   // 具体错误码、失败阶段、超时秒数一律只进日志：用户能做的动作只有换出口或等下一轮
   if (result?.reason === 'error-callback') {
     if (/^[36]\d{5}$/.test(result.errorCode || '')) {
-      return '人机验证没通过：这台机器的网络出口被站点判成风险，请主人在配置里设置 proxy.url 换个出口后重试'
+      return '人机验证没通过，请主人在配置里设置 proxy.url 后重试'
     }
     return '人机验证没通过，稍后再试'
   }
-  if (result?.stage === 'script') return '人机验证组件加载不出来，可能是网络不通，稍后再试'
+  if (result?.stage === 'script') return '人机验证组件加载不出来，请稍后重试'
   if (result?.reason === 'render-error' || result?.reason === 'evaluate-error') return '人机验证出了点问题，已知问题，稍后重试'
   if (result?.reason === 'expired') return '人机验证超时失效了，稍后再试'
   return interactive
@@ -1951,7 +1951,7 @@ function detachedResultToOutcome(result, timeoutSec) {
   if (!result.status) {
     return {
       turnstileFailed: true,
-      message: `验证已通过但签到请求发送失败：${result.error || '未知原因'}`,
+      message: `验证已通过但签到请求发送失败，请稍后重试`,
       detail: result
     }
   }
@@ -2391,7 +2391,7 @@ export async function turnstileCheckin(account, { checkinPath, headers, validati
     return quick
   }
 
-  logger.info(`[relay-checkin-plugin] Turnstile 无头尝试未通过: ${quick.message}`)
+  logger.info(`[relay-checkin-plugin] Turnstile 无头尝试未通过: ${quick.message}；可见浏览器接管已在配置中关闭`)
   const result = {
     ...quick,
     message: `${quick.message}；可见浏览器接管已在配置中关闭`
@@ -2573,7 +2573,7 @@ async function ensureVirtualDisplay() {
     logger.info(`[relay-checkin-plugin] 已启动虚拟显示 ${display} 用于人机验证（无桌面服务器）`)
     return display
   }
-  throw new Error(`该站点验证需要显示环境，但本机既无图形桌面也无法启动 Xvfb（${failures[0] || '请安装 xvfb 包'}）`)
+  throw new Error(`该站点验证需要图形环境，本机没有，请主人安装 xvfb`)
 }
 
 /**
@@ -2592,7 +2592,7 @@ async function ensureVirtualDisplay() {
 export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false, action = '', cdata = '' } = {}) {
   const cfg = getConfig()
   if (!cfg.browser.enable) {
-    return { ok: false, msg: '该站点登录需要人机验证，但配置中已关闭浏览器方案' }
+    return { ok: false, msg: '该站点登录需要人机验证，请主人在配置里打开浏览器方案' }
   }
   const safeUrl = await assertSafeRequestUrl(account.baseUrl)
   const host = safeUrl.hostname
@@ -2722,7 +2722,7 @@ export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false, a
     if (!turnstileToken) {
       noteResult(host, false)
       logger.warn(`[relay-checkin-plugin] Sub2API 人机验证未通过（已等待 ${usedSec} 秒）`)
-      return { ok: false, msg: `人机验证未通过（等待 ${usedSec} 秒）：该站点验证成功率不稳定，可稍后重试` }
+      return { ok: false, msg: `人机验证未通过，请稍后重试` }
     }
     logger.info(`[relay-checkin-plugin] Sub2API 人机验证已签发 token（${usedSec} 秒）`)
 
@@ -2763,7 +2763,7 @@ export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false, a
       noteResult(host, false)
       const msg = body?.message || body?.msg || login.error || `HTTP ${login.status}`
       if (body?.requires_2fa || data?.requires_2fa) {
-        return { ok: false, msg: '该账号开启了两步验证（2FA），插件无法自动登录' }
+        return { ok: false, msg: '该账号开启了两步验证，无法自动登录' }
       }
       return { ok: false, msg: `登录失败：${msg}` }
     }
@@ -2771,7 +2771,7 @@ export async function sub2apiLogin(account, { siteKey = '', tokenOnly = false, a
     return { ok: true, data, turnstileToken }
   } catch (err) {
     noteResult(host, false)
-    return { ok: false, msg: err?.message || String(err) }
+    return { ok: false, msg: '浏览器操作失败，请稍后重试' }
   } finally {
     if (browser) await withTimeout(browser.close(), 20000, '关闭浏览器超时').catch(() => {})
     scheduleVirtualDisplayRelease()
