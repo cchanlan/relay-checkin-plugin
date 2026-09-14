@@ -15,7 +15,7 @@ import { logger, pickBot, segment, defaultSelfId } from '../host/index.js'
  * promptMsgId 为群内「请私聊发送凭据」提示消息，绑定终态时立即撤回，否则到时撤回
  */
 const pendingBinds = new Map()
-const BIND_SCOPE_NOTICE = '授权说明：凭据将在机器人本地保存，仅用于账号验证、余额查询和自动签到；不会修改资料、消耗额度或执行其他账号操作。请仅绑定可信站点并自行承担站点风险。'
+const BIND_SCOPE_NOTICE = '授权说明：凭据会保存在机器人本地，仅用于账号验证、余额查询和自动签到；请只绑定可信站点。'
 
 function clearPending(userId) {
   const pending = pendingBinds.get(String(userId))
@@ -122,7 +122,7 @@ function progressTip(accounts) {
   const estText = estSec >= 60 ? `约 ${Math.ceil(estSec / 60)} 分钟` : `约 ${Math.max(5, Math.ceil(estSec / 5) * 5)} 秒`
   let tip = `正在为你的 ${total} 个账号依次签到，预计${estText}，完成后统一出图，请勿重复发送指令`
   if (heavy > 0) {
-    tip += `\n（其中 ${heavy} 个站点可能需要浏览器过验证，耗时较长属正常）`
+    tip += `\n（部分站点耗时较长，属正常）`
   }
   return tip
 }
@@ -149,7 +149,7 @@ function guardHang(promise, label, ms = hangBudgetMs()) {
     new Promise((_, reject) => {
       timer = setTimeout(() => {
         logger.error(`[relay-checkin-plugin] ${label} 超时（${ms / 1000}s），已停止等待结果`)
-        reject(new Error(`${label}超时，请检查网络/代理后重试`))
+        reject(new Error(`${label}超时，请稍后重试`))
       }, ms)
     })
   ])
@@ -299,7 +299,7 @@ export class RelayCheckinCore {
     } catch (err) {
       // 未预见的异常（如落盘失败）也要给用户回执，否则表现为「发了指令没反应」
       logger.error(`[relay-checkin-plugin] ${label} 执行异常:`, err)
-      await this.reply(`${label}出错了：${err?.message || err}`)
+      await this.reply(`${label}出错了，请稍后重试`)
       return false
     }
     if (!r.ok) {
@@ -469,15 +469,15 @@ export class RelayCheckinCore {
         return {
           ok: false,
           msg: turnstileFailed
-            ? `${login.msg}\n（该站点登录需要通过 Cloudflare 人机验证，与账号密码无关。可再发一次指令重试；若多次都失败，说明该站点的验证等级过高，本机环境无法通过）`
+            ? `${login.msg}\n（该站点登录需要过人机验证，可再发一次指令重试）`
             : login.msg
         }
       }
       if (!account.token) {
-        return { ok: false, msg: '登录成功，但站点未返回 refresh_token，无法维持自动签到' }
+        return { ok: false, msg: '登录成功，但该站点无法维持自动签到，请改用 #中转添加刷新令牌 绑定' }
       }
       const info = await guardHang(getAdapter('sub2api').userInfo(account), '读取账号信息')
-      if (!info?.ok) return { ok: false, msg: info?.msg || '登录后读取账号信息失败' }
+      if (!info?.ok) return { ok: false, msg: info?.msg || '登录后读取账号信息失败，请稍后重试' }
       return { ok: true, account, info }
     } catch (err) {
       return { ok: false, msg: err.message }
@@ -519,11 +519,11 @@ export class RelayCheckinCore {
       if (!renewed.ok) {
         return {
           ok: false,
-          msg: `${renewed.msg}\n（刷新令牌是一次性的：取出后若网页端又刷新过页面，该值就会失效。请重新取一次，取完不要再操作该站点网页）`
+          msg: `${renewed.msg}\n（刷新令牌是一次性的，请重新取一次，取完不要再操作该站点网页）`
         }
       }
       const info = await guardHang(getAdapter('sub2api').userInfo(account), '读取账号信息')
-      if (!info?.ok) return { ok: false, msg: info?.msg || '刷新成功但读取账号信息失败' }
+      if (!info?.ok) return { ok: false, msg: info?.msg || '刷新成功但读取账号信息失败，请稍后重试' }
       return { ok: true, account, info }
     } catch (err) {
       return { ok: false, msg: err.message }
@@ -554,12 +554,12 @@ export class RelayCheckinCore {
     try {
       const checkin = await guardHang(getAdapter('agentrouter').login(account), '验证 AgentRouter 邮箱登录')
       if (!checkin.ok) return { ok: false, msg: checkin.msg }
-      if (!account.siteUserId) return { ok: false, msg: '登录成功，但响应缺少站点用户ID' }
-      if (!account.token) return { ok: false, msg: '登录成功，但未取得新的 session cookie' }
+      if (!account.siteUserId) return { ok: false, msg: '登录成功，但该站点信息不完整，请稍后重试' }
+      if (!account.token) return { ok: false, msg: '登录成功，但该站点信息不完整，请稍后重试' }
 
       let info = checkin.info
       if (!info?.ok) info = await guardHang(getAdapter('agentrouter').userInfo(account), '读取 AgentRouter 账号')
-      if (!info?.ok) return { ok: false, msg: info?.msg || '登录后读取账号信息失败' }
+      if (!info?.ok) return { ok: false, msg: info?.msg || '登录后读取账号信息失败，请稍后重试' }
       return { ok: true, account, info, initialCheckin: checkin }
     } catch (err) {
       return { ok: false, msg: err.message }
@@ -582,15 +582,15 @@ export class RelayCheckinCore {
       if (this.e.isGroup) {
         const recallTip = getConfig().recallAdd ? '（机器人会尝试撤回）' : '（注意令牌会暴露在群里，建议发后自行撤回）'
         await this.reply(
-          '机器人已开启私聊禁用（disablePrivate），私聊补发凭据会被拦截，本次未发起绑定。可任选：\n' +
-          '1) 请主人在 config/config/other.yaml 的 disableAdopt 中加入 中转 ，之后重新发起，私聊发送：中转绑定 凭据\n' +
+          '私聊补发凭据会被拦截，本次未发起绑定。可任选：\n' +
+          '1) 请主人在 disableAdopt 中加入 中转 ，之后重新发起，私聊发送：中转绑定 凭据\n' +
           `2) 直接在本群发送完整指令${recallTip}：${fullCmd}`,
           true, { recallMsg: bindRecallSec() }
         )
       } else {
         // 本条私聊指令能到达说明完整指令格式可被放行，单发的裸凭据则会被拦截
         await this.reply(
-          '机器人已开启私聊禁用（disablePrivate），后续单发的凭据会被拦截，本次未发起绑定。' +
+          '私聊单发凭据会被拦截，本次未发起绑定。' +
           `请直接发送完整指令：${fullCmd}，或请主人在 disableAdopt 中加入 中转 后改发：中转绑定 凭据`
         )
       }
@@ -962,7 +962,7 @@ export class RelayCheckinCore {
     } catch (err) {
       // 未预见的异常也要回执，否则表现为「发了凭据没反应」
       logger.error('[relay-checkin-plugin] 绑定账号执行异常:', err)
-      await this.reply(`绑定出错了：${err?.message || err}\n可重新发送添加指令再试`)
+      await this.reply(`绑定出错了，可重新发送添加指令再试`)
       return true
     }
     if (!locked.ok) {
@@ -973,7 +973,7 @@ export class RelayCheckinCore {
       const mins = Math.max(1, Math.round(timeoutSec / 60))
       await this.reply(
         `你的「${locked.busy.label}」正在进行中（已 ${locked.busy.seconds} 秒），本次凭据未保存。` +
-        `等它完成后在 ${mins} 分钟内再发一次凭据即可，站点已记住（无需重发添加指令）`
+        `等它完成后在 ${mins} 分钟内再发一次凭据即可，无需重发添加指令`
       )
     }
     return true
@@ -1044,7 +1044,7 @@ export class RelayCheckinCore {
       // 实时刷新余额（AnyRouter 等浏览器站耗时长，用缓存）；签到状态来自本插件签到记录
       await refreshBalances(entry)
       const img = await renderList(entry)
-      await this.replyImage(img, '列表渲染失败，请查看日志')
+      await this.replyImage(img, '列表渲染失败，请稍后重试')
     })
     return true
   }

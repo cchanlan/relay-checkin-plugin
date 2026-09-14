@@ -138,7 +138,7 @@ async function ensureToken(account, { forceRenew = false, allowBrowser = true } 
     return {
       ok: false,
       msg: account.authMode === 'refresh'
-        ? '刷新令牌已失效，请用「#中转添加刷新令牌 地址」重新绑定（该站点无法自动过人机验证）'
+        ? '刷新令牌已失效，请用「#中转添加刷新令牌 地址」重新绑定'
         : 'Session 已过期且未保存邮箱密码，请重新绑定该站点'
     }
   }
@@ -162,7 +162,7 @@ async function ensureToken(account, { forceRenew = false, allowBrowser = true } 
  * 站点每次都会轮换 refresh_token 并立刻作废旧值，所以换到就必须写回 account。
  */
 async function renewByRefreshToken(account) {
-  if (!account.token) return { ok: false, msg: '没有可用的刷新令牌' }
+  if (!account.token) return { ok: false, msg: '没有可用的刷新令牌，请重新绑定该站点' }
   const res = await request(apiUrl(account, '/auth/refresh'), {
     method: 'POST',
     body: { refresh_token: account.token }
@@ -310,7 +310,7 @@ const adapter = {
     const res = await authed(account, '/auth/me', { allowBrowser })
     if (res.authFailed) return { ok: false, msg: res.msg }
     const { ok, data, msg } = unwrap(res)
-    if (!ok || !data) return { ok: false, msg: msg || '获取用户信息失败' }
+    if (!ok || !data) return { ok: false, msg: msg || '获取用户信息失败，请稍后重试' }
     return {
       ok: true,
       username: data.username || data.email || '',
@@ -353,7 +353,7 @@ const adapter = {
 
   async checkin(account) {
     const status = await this.getCheckinStatus(account)
-    if (status.supported === false) return { ok: false, already: false, msg: '站点没有签到接口' }
+    if (status.supported === false) return { ok: false, already: false, msg: '该站点没有签到接口，签不了' }
     if (status.ok && status.enabled === false) {
       return { ok: false, already: false, msg: '站点已关闭签到功能' }
     }

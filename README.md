@@ -20,11 +20,21 @@
 
 ## 安装
 
-在 Yunzai 根目录执行（两个仓库内容相同）：
+在 Yunzai 根目录执行（三个源内容相同，任选一个，推荐国内的）：
 
+**gitcode（国内直连最快）**
 ```bash
 git clone --depth=1 https://gitcode.com/ccxhan/relay-checkin-plugin ./plugins/relay-checkin-plugin
-# GitHub 也行：https://github.com/cchanlan/relay-checkin-plugin
+```
+
+**gitee（国内）**
+```bash
+git clone --depth=1 https://gitee.com/longhengmu/relay-checkin-plugin ./plugins/relay-checkin-plugin
+```
+
+**GitHub**
+```bash
+git clone --depth=1 https://github.com/cchanlan/relay-checkin-plugin ./plugins/relay-checkin-plugin
 ```
 
 重启即可，依赖蹭 Yunzai 自带的。
@@ -65,10 +75,27 @@ Python 3.14 上 `venv` 建完可能没有 `pip`（自带的旧版 pip 与 3.14 �
 
 ### 装在 Yunzai NG 上
 
+在 NG 主目录执行（三个源内容相同，任选一个）：
+
+**gitcode（国内直连最快）**
 ```bash
-# 在 NG 主目录执行
+git clone --depth=1 https://gitcode.com/ccxhan/relay-checkin-plugin ./plugins/relay-checkin-plugin
+```
+
+**gitee（国内）**
+```bash
+git clone --depth=1 https://gitee.com/longhengmu/relay-checkin-plugin ./plugins/relay-checkin-plugin
+```
+
+**GitHub**
+```bash
 git clone --depth=1 https://github.com/cchanlan/relay-checkin-plugin ./plugins/relay-checkin-plugin
-# NG 侧没有现成依赖可蹭。puppeteer 只用于过码，出图走内核渲染器，可跳过 Chromium 下载
+```
+
+装依赖（NG 侧没有现成依赖可蹭）：
+
+```bash
+# puppeteer 只用于过码，出图走内核渲染器，可跳过 Chromium 下载
 PUPPETEER_SKIP_DOWNLOAD=1 npm install --prefix ./plugins/relay-checkin-plugin
 ```
 

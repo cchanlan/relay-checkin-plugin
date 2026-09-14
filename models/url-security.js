@@ -129,11 +129,11 @@ export async function assertSafeRequestUrl(input, security = null) {
   try {
     addresses = await resolveHost(host)
   } catch (err) {
-    throw new Error(`站点域名解析失败: ${err?.message || err}`)
+    throw new Error(`站点域名解析失败，请检查地址`)
   }
-  if (!addresses.length) throw new Error('站点域名没有可用地址')
+  if (!addresses.length) throw new Error('站点域名没有可用地址，请检查地址')
   const blocked = addresses.find(item => isPrivateAddress(item.address))
-  if (blocked) throw new Error(`站点域名解析到了受保护地址 ${blocked.address}`)
+  if (blocked) throw new Error(`站点域名解析到了受保护地址，拒绝访问`)
   return url
 }
 

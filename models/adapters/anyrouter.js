@@ -3,7 +3,7 @@ import { fetchWafCookies } from '../browser.js'
 import { getConfig } from '../config.js'
 import { logger } from '../../host/index.js'
 
-const WAF_MSG = 'WAF 未放行（浏览器等待超时），请稍后重试'
+const WAF_MSG = '站点拦截未放行，请稍后重试'
 
 /**
  * WAF cookie 缓存（host -> { cookieHeader, at }）：
@@ -61,7 +61,7 @@ export default {
       if (cached) return { ok: true, cookieHeader: cached }
     }
     if (!getConfig().browser.enable) {
-      return { ok: false, msg: '浏览器方案未启用（browser.enable），无法过 WAF' }
+      return { ok: false, msg: '浏览器方案未启用，请主人把配置里的 browser.enable 打开' }
     }
     const res = await fetchWafCookies(account)
     if (res.wafBlocked || !res.cookieHeader) return { ok: false, msg: WAF_MSG }
@@ -89,7 +89,7 @@ export default {
         logger.info(`[relay-checkin-plugin] anyrouter ${path} 返回非 JSON (HTTP ${res.status})，刷新 WAF cookie 重试`)
       } else {
         return {
-          failed: `接口未返回有效数据 (HTTP ${res.status})，可能被 WAF 拦截`,
+          failed: `接口未返回有效数据 (HTTP ${res.status})`,
           uncertain: String(method).toUpperCase() === 'POST'
         }
       }
