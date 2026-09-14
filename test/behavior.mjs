@@ -25,8 +25,10 @@ if (hadData) fs.renameSync(DATA, backup)
 // ---- mock fetch：按 (method, url) 路由 ----
 let routes = {}
 const realFetch = global.fetch
+const networkCalls = []
 global.fetch = async (url, opts = {}) => {
   const key = `${opts.method || 'GET'} ${url}`
+  networkCalls.push(key)
   const handler = routes[key]
   if (!handler) throw new Error(`mock fetch 未定义路由: ${key}`)
   const { status = 200, body = null, capture, setCookies = [] } = typeof handler === 'function' ? handler(opts) : handler
@@ -715,6 +717,339 @@ try {
   assert.equal(retriedGet.status, 200)
   assert.equal(getAttempts, 3)
 
+  // ---- 7.4 每日抽奖：独立执行，一条站点记录的批注分别展示奖励 ----
+  cfgNow.security.allowedPrivateHosts.push('lottery.test')
+  const lotteryAccount = {
+    name: 'lottery.test', baseUrl: 'https://lottery.test', type: 'newapi',
+    token: 'LOTTERY_TEST_TOKEN', siteUserId: 21
+  }
+  let lotteryBalance = 1000000
+  let lotteryPosts = 0
+  let lotteryAuth = null
+  routes = {
+    [`GET https://lottery.test/api/user/checkin?month=${month}`]: { status: 404 },
+    'GET https://lottery.test/api/user/self': () => ({
+      body: { success: true, data: { quota: lotteryBalance, used_quota: 0 } }
+    }),
+    'POST https://lottery.test/api/user/checkin': () => {
+      lotteryBalance += 250000
+      return { body: { success: true } }
+    },
+    'GET https://lottery.test/api/site/welfare/status': {
+      body: { success: true, data: { quota: 1250000, daily_lottery: { Done: false } } }
+    },
+    'POST https://lottery.test/api/site/welfare/lottery': opts => {
+      lotteryPosts++
+      lotteryAuth = opts.headers
+      lotteryBalance += 7500000
+      return { body: { success: true, data: {
+        label: '每日抽奖获得 15.00 额度', net_quota: 7500000,
+        balance_before: 1250000, balance_quota: lotteryBalance
+      } } }
+    }
+  }
+  const lotteryRows = await checkinEntry({ accounts: [{ ...lotteryAccount }] })
+  assert.equal(lotteryRows.length, 1, '同一站点只能有一条记录，签到和每日抽奖应分列在批注里')
+  assert.equal(lotteryRows[0].name, 'lottery.test')
+  assert.equal(lotteryRows[0].statusText, '签到成功')
+  assert.equal(lotteryRows[0].award, '+$0.50', '本次列仍是签到奖励，不能混入抽奖所得')
+  assert.equal(lotteryRows[0].balance, '$17.50', '站点余额显示全部活动结束后的余额')
+  assert.equal(lotteryRows[0].msg, '签到：签到成功，+$0.50\n每日抽奖：抽奖成功，+$15.00')
+  assert.equal(lotteryPosts, 1, '每日抽奖POST只提交一次')
+  assert.equal(lotteryAuth.Authorization, 'Bearer LOTTERY_TEST_TOKEN')
+  assert.equal(lotteryAuth['New-Api-User'], '21')
+
+  // 无福利接口按站点缓存，避免每个账号、每次签到都探测不存在的路径。
+  const { checkinAccountResults } = await import('../models/executor.js')
+  const signedRoutes = host => ({
+    [`GET https://${host}/api/user/checkin?month=${month}`]: {
+      body: { success: true, data: { stats: { checked_in_today: true, records: [] } } }
+    },
+    [`GET https://${host}/api/user/self`]: {
+      body: { success: true, data: { quota: 2000000, used_quota: 0 } }
+    }
+  })
+  const lotteryAcc = (host, id = 21) => ({ ...lotteryAccount, name: host, baseUrl: `https://${host}`, siteUserId: id })
+  cfgNow.security.allowedPrivateHosts.push('plain-lottery.test')
+  let absentProbes = 0
+  routes = {
+    ...signedRoutes('plain-lottery.test'),
+    'GET https://plain-lottery.test/api/site/welfare/status': () => {
+      absentProbes++
+      return { status: 404 }
+    }
+  }
+  const plainRows = await checkinEntry({ accounts: [lotteryAcc('plain-lottery.test'), lotteryAcc('plain-lottery.test', 22)] })
+  assert.equal(plainRows.length, 2, '不支持福利中心的站点只显示原签到行')
+  assert.equal(absentProbes, 1, '不存在的福利接口应按站点缓存，不能逐账号重复探测')
+
+  // 同一站点账号可能被多个用户同时触发；只共享互斥，不共享领取状态。
+  cfgNow.security.allowedPrivateHosts.push('concurrent-lottery.test')
+  let concurrentDone = false
+  let concurrentPosts = 0
+  routes = {
+    ...signedRoutes('concurrent-lottery.test'),
+    'GET https://concurrent-lottery.test/api/site/welfare/status': () => ({
+      body: { success: true, data: { quota: 2000000, daily_lottery: { done: concurrentDone } } }
+    }),
+    'POST https://concurrent-lottery.test/api/site/welfare/lottery': () => {
+      concurrentPosts++
+      concurrentDone = true
+      return { body: { success: true, data: { net_quota: 500000, balance_quota: 2500000 } } }
+    }
+  }
+  const concurrentRows = await Promise.all([
+    checkinAccountResults(lotteryAcc('concurrent-lottery.test')),
+    checkinAccountResults(lotteryAcc('concurrent-lottery.test'))
+  ])
+  assert.equal(concurrentPosts, 1, '同一站点账号并发触发时每日抽奖只能提交一次')
+  assert.deepEqual(concurrentRows.map(rows => rows[1].status).sort(), ['already', 'ok'])
+  assert.equal(concurrentRows.find(rows => rows[1].status === 'already')[1].award, '', '今日已抽不重复展示新奖励')
+
+  // POST响应丢失：只读复查，禁止再发一次POST，禁止凭余额差猜奖励。
+  cfgNow.security.allowedPrivateHosts.push('lost-lottery.test')
+  let lostPosts = 0
+  let lostStatusReads = 0
+  routes = {
+    ...signedRoutes('lost-lottery.test'),
+    'GET https://lost-lottery.test/api/site/welfare/status': () => {
+      lostStatusReads++
+      return { body: { success: true, data: {
+        quota: lostPosts ? 9500000 : 2000000,
+        daily_lottery: { Done: lostPosts > 0 }
+      } } }
+    },
+    'POST https://lost-lottery.test/api/site/welfare/lottery': () => {
+      lostPosts++
+      throw new Error('connection reset after write')
+    }
+  }
+  const lostRows = await checkinAccountResults(lotteryAcc('lost-lottery.test'))
+  assert.equal(lostRows[1].status, 'ok', '抽奖POST响应丢失后应以只读状态复查确认领取')
+  assert.equal(lostPosts, 1, '抽奖POST响应丢失不能重试')
+  assert.equal(lostStatusReads, 2, 'POST前查状态、响应丢失后再复查一次')
+  assert.equal(lostRows[1].award, '', '不能把复查余额的变化冒充抽奖奖励')
+  assert.match(lostRows[1].msg, /复查/)
+
+  // 空值、字符串和两个大小写字段冲突时都不能推断成“未抽”。
+  for (const flags of [{}, { Done: 'false' }, { Done: false, done: true }, { Done: 'true', done: false }]) {
+    routes = {
+      ...signedRoutes('lottery.test'),
+      'GET https://lottery.test/api/site/welfare/status': {
+        body: { success: true, data: { daily_lottery: flags } }
+      },
+      'POST https://lottery.test/api/site/welfare/lottery': {
+        body: { success: true, data: { net_quota: 500000 } }
+      }
+    }
+    networkCalls.length = 0
+    const rows = await checkinAccountResults(lotteryAcc('lottery.test'))
+    assert.equal(rows[1].status, 'fail', '抽奖状态字段缺失、类型错误或冲突时必须停止领取')
+    assert.equal(networkCalls.filter(key => key.startsWith('POST ')).length, 0)
+  }
+
+  // 已完成、已知需扣费均只读状态；不重复发奖，不碰幸运签到。
+  for (const [flags, expectedStatus] of [[{ done: true }, 'already'], [{ Done: false, cost_quota: 1 }, 'fail']]) {
+    routes = {
+      ...signedRoutes('lottery.test'),
+      'GET https://lottery.test/api/site/welfare/status': {
+        body: { success: true, data: { quota: 2000000, daily_lottery: flags, checkin: { Done: false } } }
+      }
+    }
+    networkCalls.length = 0
+    const rows = await checkinAccountResults(lotteryAcc('lottery.test'))
+    assert.equal(rows[1].status, expectedStatus)
+    assert.equal(rows[1].award, '')
+    assert.equal(networkCalls.filter(key => key.startsWith('POST ')).length, 0, '已领取或需扣费都不得提交')
+  }
+
+  // 兼容另行提供的跳过配置：本PR只负责不执行每日抽奖。
+  // 签到本身的跳过与只读余额由#13负责；缺少skip配置时不影响普通站点。
+  const savedSkipConfig = cfgNow.skip
+  cfgNow.skip = { hosts: ['lottery.test'] }
+  routes = signedRoutes('lottery.test')
+  try {
+    networkCalls.length = 0
+    const rows = await checkinAccountResults(lotteryAcc('lottery.test'))
+    assert.equal(rows.length, 1)
+    assert.ok(networkCalls.every(key => !key.includes('/api/site/welfare/')), '命中跳过清单时不得探测或提交每日抽奖')
+  } finally { cfgNow.skip = savedSkipConfig }
+
+  // 503不可永久写成“不支持”，恢复后仍可识别并领取。
+  cfgNow.security.allowedPrivateHosts.push('recover-lottery.test')
+  let recoverReads = 0
+  routes = {
+    ...signedRoutes('recover-lottery.test'),
+    'GET https://recover-lottery.test/api/site/welfare/status': () => {
+      recoverReads++
+      return recoverReads === 1 ? { status: 503 } : {
+        body: { success: true, data: { daily_lottery: { Done: true } } }
+      }
+    }
+  }
+  assert.equal((await checkinAccountResults(lotteryAcc('recover-lottery.test'))).length, 1)
+  assert.equal((await checkinAccountResults(lotteryAcc('recover-lottery.test')))[1].status, 'already')
+  assert.equal(recoverReads, 2)
+  routes = {
+    ...signedRoutes('recover-lottery.test'),
+    'GET https://recover-lottery.test/api/site/welfare/status': { status: 503 }
+  }
+  const failedProbe = await checkinAccountResults(lotteryAcc('recover-lottery.test'))
+  assert.equal(failedProbe[0].status, 'already')
+  assert.equal(failedProbe[1].status, 'fail', '已识别的抽奖能力暂时故障，应单列失败而非隐去')
+
+  // 没有奖励字段时不猜；签到失败不能被独立的抽奖成功覆盖。
+  routes = {
+    [`GET https://lottery.test/api/user/checkin?month=${month}`]: { status: 404 },
+    'GET https://lottery.test/api/user/self': { body: { success: true, data: { quota: 2000000, used_quota: 0 } } },
+    'POST https://lottery.test/api/user/checkin': { body: { success: false, message: '余额不足' } },
+    'GET https://lottery.test/api/site/welfare/status': {
+      body: { success: true, data: { daily_lottery: { Done: false } } }
+    },
+    'POST https://lottery.test/api/site/welfare/lottery': {
+      body: { success: true, data: { label: '每日抽奖获得 15.00 额度', balance_before: 2000000, balance_quota: 9500000 } }
+    }
+  }
+  const failedSignAccount = { ...lotteryAcc('lottery.test'), lastCheckinAt: '2000-01-01T00:00:00.000Z', lastCheckinConfirmed: false }
+  const independentRows = await checkinAccountResults(failedSignAccount)
+  assert.equal(independentRows[0].status, 'fail', '抽奖成功不能洗白签到失败')
+  assert.equal(independentRows[1].status, 'ok')
+  assert.equal(independentRows[1].award, '', 'label及余额差不能代替明确的抽奖奖励字段')
+  assert.equal(failedSignAccount.lastCheckinAt, '2000-01-01T00:00:00.000Z', '抽奖不得覆盖签到日期')
+  assert.equal(failedSignAccount.lastCheckinConfirmed, false, '抽奖不得覆盖签到确认状态')
+  assert.equal(failedSignAccount.lastBalance, '$19.00', '抽奖后余额应更新账号缓存')
+  assert.equal(networkCalls.filter(key => key.includes('/api/site/welfare/') &&
+    !['GET https://lottery.test/api/site/welfare/status', 'POST https://lottery.test/api/site/welfare/lottery',
+      'GET https://recover-lottery.test/api/site/welfare/status'].includes(key)).length, 0, '只允许福利状态GET与每日抽奖POST')
+  console.log('每日抽奖行为与安全边界 OK')
+
+  // 绑定入口也要执行独立抽奖，并将结果交给同一套图片/文字输出。
+  cfgNow.security.allowedPrivateHosts.push('binding-lottery.test')
+  const { currentHost } = await import('../host/index.js')
+  const { RelayCheckinCore } = await import('../apps/checkin.js')
+  const originalHost = currentHost()
+  let bindingRender = null
+  const bindingReplies = []
+  let bindingDone = false
+  routes = {
+    ...signedRoutes('binding-lottery.test'),
+    'GET https://binding-lottery.test/api/site/welfare/status': () => ({
+      body: { success: true, data: { quota: bindingDone ? 2500000 : 2000000, daily_lottery: { Done: bindingDone } } }
+    }),
+    'POST https://binding-lottery.test/api/site/welfare/lottery': () => {
+      bindingDone = true
+      return { body: { success: true, data: { net_quota: 500000, balance_quota: 2500000 } } }
+    }
+  }
+  installHost({ ...originalHost, renderTemplate: async (name, data) => {
+    bindingRender = { name, data }
+    return false // 图片不可用，验证文字兜底也包含抽奖结果。
+  } })
+  try {
+    const core = new RelayCheckinCore({
+      e: { user_id: 987, self_id: 10000, isGroup: false, sender: { nickname: '测试用户' } },
+      reply: async text => { bindingReplies.push(text) }
+    })
+    const bound = await core.saveAccount(lotteryAcc('binding-lottery.test'), { username: 'u', siteUserId: 21, balanceText: '$4.00' })
+    assert.equal(bindingRender.data.users[0].accounts.length, 1, '绑定结果也只能有一条站点记录')
+    assert.match(bindingRender.data.users[0].accounts[0].statusText, /添加成功/)
+    assert.equal(bindingRender.data.users[0].accounts[0].balance, '$5.00')
+    assert.match(bindingRender.data.users[0].accounts[0].msg, /每日抽奖：抽奖成功，\+\$1\.00/)
+    assert.equal(bound.balance, '$5.00', '绑定通知显示最后一次抽奖后的余额')
+    assert.match(bindingReplies.at(-1), /每日抽奖/)
+    assert.equal(bindingReplies.at(-1).split('\n').length, 2, '同一站点的文字批注明细应保留换行')
+    assert.match(bindingReplies.at(-1), /\+\$1\.00/)
+    assert.equal(bindingRender.data.summaryItems.find(item => item.tone === 'notice').label, '已完成 / 待核')
+
+    networkCalls.length = 0
+    await core.saveAccount(lotteryAcc('binding-lottery.test'), { username: 'u', siteUserId: 21, balanceText: '$5.00' }, { ok: true, already: true })
+    assert.match(bindingRender.data.users[0].accounts[0].msg, /每日抽奖：今日已抽/)
+    assert.ok(networkCalls.every(key => key.includes('/api/site/welfare/')), '绑定已带签到结果时不可重新签到，只复查抽奖')
+  } finally { installHost(originalHost) }
+
+  // 同站不同账号的领取状态必须隔离，换日则以新读到的站点状态为准。
+  cfgNow.security.allowedPrivateHosts.push('accounts-lottery.test', 'uncertain-lottery.test')
+  const drawnUsers = new Set(['22'])
+  const accountPosts = []
+  routes = {
+    ...signedRoutes('accounts-lottery.test'),
+    'GET https://accounts-lottery.test/api/site/welfare/status': opts => ({
+      body: { success: true, data: { daily_lottery: { Done: drawnUsers.has(opts.headers['New-Api-User']) } } }
+    }),
+    'POST https://accounts-lottery.test/api/site/welfare/lottery': opts => {
+      const uid = opts.headers['New-Api-User']
+      accountPosts.push(uid)
+      drawnUsers.add(uid)
+      return { body: { success: true, data: { net_quota: 0, balance_quota: 2000000 } } }
+    }
+  }
+  const isolatedRows = await checkinEntry({ accounts: [lotteryAcc('accounts-lottery.test', 21), lotteryAcc('accounts-lottery.test', 22)] })
+  assert.equal(isolatedRows.length, 2, '同站两个账号仍只显示两条记录')
+  assert.match(isolatedRows[0].msg, /每日抽奖：抽奖成功/)
+  assert.match(isolatedRows[1].msg, /每日抽奖：今日已抽/)
+  assert.deepEqual(accountPosts, ['21'])
+  assert.match(isolatedRows[0].msg, /每日抽奖：抽奖成功，\+\$0\.00/, '零奖励也应明确写在批注中')
+  drawnUsers.clear() // 模拟站点换日重置，插件不得沿用昨日done缓存。
+  const nextDayRows = await checkinAccountResults(lotteryAcc('accounts-lottery.test', 21))
+  assert.equal(nextDayRows[1].status, 'ok')
+  assert.deepEqual(accountPosts, ['21', '21'])
+
+  let uncertainPosts = 0
+  routes = {
+    ...signedRoutes('uncertain-lottery.test'),
+    'GET https://uncertain-lottery.test/api/site/welfare/status': {
+      body: { success: true, data: { daily_lottery: { Done: false } } }
+    },
+    'POST https://uncertain-lottery.test/api/site/welfare/lottery': () => {
+      uncertainPosts++
+      return { status: 502, body: null }
+    }
+  }
+  const uncertainRows = await checkinAccountResults(lotteryAcc('uncertain-lottery.test'))
+  assert.equal(uncertainRows[0].status, 'already')
+  assert.equal(uncertainRows[1].status, 'unknown', '服务端异常且状态未确认时不能虚报领取成功')
+  assert.equal(uncertainPosts, 1, 'HTTP 5xx也不得重试领取POST')
+  routes['POST https://uncertain-lottery.test/api/site/welfare/lottery'] = {
+    body: { success: false, message: '今天已经抽奖过啦' }
+  }
+  const raceRows = await checkinAccountResults(lotteryAcc('uncertain-lottery.test'))
+  assert.equal(raceRows[1].statusText, '今日已抽')
+  assert.equal(raceRows[1].award, '')
+
+  // 404负缓存必须有期限，站点后来增加福利中心仍能重新识别。
+  const actualNow = Date.now
+  try {
+    const future = actualNow() + 7 * 60 * 60 * 1000
+    Date.now = () => future
+    routes = {
+      ...signedRoutes('plain-lottery.test'),
+      'GET https://plain-lottery.test/api/site/welfare/status': {
+        body: { success: true, data: { daily_lottery: { done: true } } }
+      }
+    }
+    assert.equal((await checkinAccountResults(lotteryAcc('plain-lottery.test')))[1].status, 'already')
+  } finally { Date.now = actualNow }
+
+  // 余额查询/列表不执行福利动作；自动关闭的账号也不参与抽奖。
+  const { queryEntry } = await import('../models/executor.js')
+  routes = signedRoutes('lottery.test')
+  networkCalls.length = 0
+  await queryEntry({ accounts: [lotteryAcc('lottery.test')] })
+  await refreshBalances({ accounts: [lotteryAcc('lottery.test')] })
+  assert.ok(networkCalls.every(key => key.endsWith('/api/user/self')))
+  networkCalls.length = 0
+  assert.deepEqual(await checkinEntry({ accounts: [{ ...lotteryAcc('lottery.test'), auto: false }] }, { autoOnly: true }), [])
+  assert.equal(networkCalls.length, 0)
+  const { combineCheckinResults } = await import('../models/executor.js')
+  const rawFailure = JSON.stringify(independentRows)
+  const combinedFailure = combineCheckinResults(independentRows)
+  assert.equal(combinedFailure.status, 'fail', '批注归并不能洗白签到失败')
+  assert.match(combinedFailure.msg, /签到：签到失败.*余额不足/)
+  assert.match(combinedFailure.msg, /每日抽奖：抽奖成功/)
+  assert.equal(JSON.stringify(independentRows), rawFailure, '展示归并不得修改执行层的原始活动结果')
+  assert.match(combineCheckinResults(failedProbe).msg, /每日抽奖：抽奖失败/)
+  console.log('每日抽奖并发、换日、复核与入口回归 OK')
+
   // ---- 8. AnyRouter：浏览器只负责取 WAF cookie，接口调用走普通 HTTP ----
   const anyrouter = (await import('../models/adapters/anyrouter.js')).default
   const AR2 = { name: 'anyrouter.top', baseUrl: 'https://anyrouter.top', type: 'anyrouter', token: 'S', siteUserId: 8 }
@@ -777,6 +1112,22 @@ try {
   assert.ok(html.includes('status-mark ok') && html.includes('status-mark fail'))
   assert.ok(html.includes('叁') && html.includes('3 条') && html.includes('用户一'), '大写数字必须同时带普通数字/序号注释')
   assert.ok(html.includes('凭据无效'))
+
+  const { renderResult } = await import('../models/render.js')
+  const renderHost = currentHost()
+  installHost({ ...renderHost, renderTemplate: async (name, data) => art(path.join(tplDir, `${name}.html`), data) })
+  try {
+    const lotteryHtml = await renderResult({ title: '中转站签到', users: [{ nickname: '测试用户', userId: '123', accounts: lotteryRows }] })
+    assert.equal((lotteryHtml.match(/class="acc-row"/g) || []).length, 1, '结果图不能把每日抽奖画成第二个站点')
+    assert.ok(lotteryHtml.includes('每日抽奖') && lotteryHtml.includes('抽奖成功'))
+    assert.ok(lotteryHtml.includes('+$0.50') && lotteryHtml.includes('+$15.00'))
+    assert.ok(lotteryHtml.includes('已完成 / 待核'))
+    assert.ok(!lotteryHtml.includes('+$15.50'), '不能合并签到与抽奖奖励')
+    assert.ok(lotteryHtml.includes('批注：签到：签到成功，+$0.50\n每日抽奖：抽奖成功，+$15.00'))
+    assert.match(fs.readFileSync(path.join(tplDir, 'result.html'), 'utf8'), /\.acc-msg\s*\{[^}]*white-space:\s*pre-line/s, '批注明细的换行必须在实际渲染时保留')
+
+  } finally { installHost(renderHost) }
+
 
   html = art(path.join(tplDir, 'result.html'), {
     title: '中转站账号', subtitle: '', time: 'T', seal: { top: '账号', bottom: '已录' },

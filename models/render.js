@@ -19,6 +19,14 @@ function chineseInteger(value, digits) {
   return String(n)
 }
 
+/** 图片不可用时，按相同结果行输出文字，签到与抽奖仍保持分行。 */
+export function formatResultRows(rows) {
+  return rows.map(row => `${row.name}: ${row.statusText}`
+    + (row.award ? ` ${row.award}` : '')
+    + (row.balance && row.balance !== '-' ? `，余额${row.balance}` : '')
+    + (row.msg ? `（${row.msg}）` : '')).join('\n')
+}
+
 function resultSeal(title) {
   if (/查询/.test(title)) return { top: '余额', bottom: '已录' }
   if (/账号/.test(title)) return { top: '账号', bottom: '已录' }
@@ -44,7 +52,7 @@ function resultViewData(users) {
   const summaryItems = [
     { label: '结果条目', tone: '', mark: chineseInteger(summary.total, FINANCIAL_CN_DIGITS), value: summary.total },
     { label: '执行成功', tone: 'ok', mark: chineseInteger(summary.ok, FINANCIAL_CN_DIGITS), value: summary.ok },
-    { label: '已签 / 待核', tone: 'notice', mark: chineseInteger(summary.notice, FINANCIAL_CN_DIGITS), value: summary.notice },
+    { label: '已完成 / 待核', tone: 'notice', mark: chineseInteger(summary.notice, FINANCIAL_CN_DIGITS), value: summary.notice },
     { label: '执行异常', tone: 'fail', mark: chineseInteger(summary.fail, FINANCIAL_CN_DIGITS), value: summary.fail }
   ]
   return { users: decoratedUsers, summaryItems }
