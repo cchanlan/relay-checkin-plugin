@@ -1,4 +1,5 @@
 import { getConfig } from '../models/config.js'
+import { matchSkipHost } from '../models/checkin-policy.js'
 import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist, setPushGroup, rememberGroup } from '../models/store.js'
 import { probeAccount, probeSessionAccount, probeSub2apiSite, normalizeBaseUrl, getAdapter, cookieTypeForHost, preferredBindingForHost } from '../models/adapters/index.js'
 import { checkinEntry, checkinAccount, finalizeCheckinResult, queryEntry, refreshBalances } from '../models/executor.js'
@@ -111,20 +112,20 @@ function agentRouterCookieHint(site) {
  * 明确告知预计耗时，避免用户以为卡死而重复发指令
  */
 function progressTip(accounts) {
-  const total = accounts.length
-  if (total <= 1) return '正在签到，请稍候...'
+  const targets = accounts.filter(account => !matchSkipHost(account.name, getConfig().skip?.hosts))
+  const total = targets.length
+  const skipped = accounts.length - total
+  if (!total) return `${skipped} 个账号已设为跳过签到，本轮仅查询余额`
+  const skipNotice = skipped ? `\n（另有 ${skipped} 个账号跳过签到，仅查询余额）` : ''
+  if (total <= 1) return '正在为 1 个账号签到，请稍候...' + skipNotice
 
-  // 浏览器方案站点（过 WAF / 人机验证）单个约 30~60 秒，普通 API 站约 1~3 秒。
-  // Sub2API 在 access_token 与 refresh_token 都失效时也要开浏览器过 Turnstile 重登，
-  // 且它的可见过码额度就是 120 秒，漏算会把预计耗时报得远低于实际
-  const heavy = accounts.filter(acc => acc.type === 'anyrouter' || acc.type === 'sub2api').length
+  // 仅对实际签到的账号估算耗时，不把只查余额的跳过项当作浏览器任务。
+  const heavy = targets.filter(acc => acc.type === 'anyrouter' || acc.type === 'sub2api').length
   const estSec = heavy * 45 + (total - heavy) * 3
   const estText = estSec >= 60 ? `约 ${Math.ceil(estSec / 60)} 分钟` : `约 ${Math.max(5, Math.ceil(estSec / 5) * 5)} 秒`
   let tip = `正在为你的 ${total} 个账号依次签到，预计${estText}，完成后统一出图，请勿重复发送指令`
-  if (heavy > 0) {
-    tip += `\n（部分站点耗时较长，属正常）`
-  }
-  return tip
+  if (heavy > 0) tip += `\n（${heavy} 个站点可能耗时较长）`
+  return tip + skipNotice
 }
 
 /**
@@ -1081,7 +1082,7 @@ export class RelayCheckinCore {
 
     await this.runLocked('签到', async () => {
       const targets = index ? [entry.accounts[index - 1]] : entry.accounts
-      await this.reply(index
+      await this.reply(index && !matchSkipHost(targets[0].name, getConfig().skip?.hosts)
         ? `正在签到 [${index}] ${accountLabel(targets[0])}，请稍候...`
         : progressTip(targets))
       const results = await checkinEntry(entry, { index })
