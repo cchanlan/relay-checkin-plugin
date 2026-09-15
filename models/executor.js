@@ -1,3 +1,4 @@
+import { matchSkipHost } from './checkin-policy.js'
 import { getAdapter } from './adapters/index.js'
 import { quotaToUsd, request, parseCheckinResult, classifyValidation, deriveAwardQuota, proxySetupHint, hostOf } from './adapters/common.js'
 import { powCheckin, turnstileCheckin } from './browser.js'
@@ -21,6 +22,8 @@ function safePersist() {
 }
 
 export const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
+
+export { matchSkipHost } from './checkin-policy.js'
 
 const STATUS_TEXT = { ok: '签到成功', already: '今日已签', unknown: '签到未确认', fail: '签到失败' }
 
@@ -208,9 +211,9 @@ async function readCheckinStatus(adapter, account) {
   }
 }
 
-async function readUserInfo(adapter, account) {
+async function readUserInfo(adapter, account, options) {
   try {
-    const info = await adapter.userInfo(account)
+    const info = await adapter.userInfo(account, options)
     return info?.ok ? info : null
   } catch {
     return null
@@ -223,6 +226,23 @@ async function readUserInfo(adapter, account) {
  */
 export async function checkinAccount(account) {
   const adapter = getAdapter(account.type)
+  // 跳过签到和抽奖，但仍查询余额；不为查询启动浏览器过验证。
+  if (matchSkipHost(account.name, getConfig().skip?.hosts)) {
+    logger.info(`[relay-checkin-plugin] ${account.name} 命中跳过清单，仅查询余额`)
+    const info = await readUserInfo(adapter, account, { allowBrowser: false })
+    const balance = info?.balanceText && info.balanceText !== '-' ? info.balanceText : null
+    if (balance) account.lastBalance = balance
+    const cached = account.lastBalance && account.lastBalance !== '-' ? account.lastBalance : null
+    // 跳过不是实际完成签到：保留原签到日期、确认状态，只更新余额缓存。
+    return {
+      name: accountLabel(account),
+      status: 'ok',
+      statusText: '跳过签到',
+      award: '',
+      balance: balance || (cached ? `${cached}（缓存）` : '-'),
+      msg: '不支持该站点'
+    }
+  }
   let r = null
   let beforeStatus = null
   let beforeInfo = null

@@ -59,12 +59,14 @@ try {
   // 手动指令的整体超时预算必须覆盖排队与当前选择的验证模式，
   // 否则会出现「已告知失败但任务稍后真的执行了」的矛盾结果
   assert.equal(cfg.browser.slotWaitSec, 120)
+  assert.deepEqual(cfg.skip.hosts, [], 'skip.hosts 默认应为空数组')
   assert.ok(
     cfg.browser.slotWaitSec + cfg.browser.turnstileTimeoutSec +
       cfg.browser.turnstileInteractiveTimeoutSec + 120 > cfg.browser.slotWaitSec
   )
   const cfgText = fs.readFileSync(path.join(DATA, 'config.yaml'), 'utf-8')
   assert.ok(cfgText.includes('proxy:') && cfgText.includes('groupRecallSec'), '新增配置项应写回配置文件')
+  assert.ok(cfgText.includes('skip:'), '跳过清单配置项应写回配置文件')
   assert.ok(cfgText.includes('turnstileInteractiveTimeoutSec'), '交互式 Turnstile 新配置应写回旧配置文件')
   assert.ok(cfgText.includes('0 0 9 * * *') && cfgText.includes('mode: private'), '写回后用户值应保留')
   assert.ok(cfgText.includes('# 代理设置'), '模板注释应保留')
@@ -691,6 +693,17 @@ try {
   assert.equal(r.awardQuota, 100000)
   r = parseCheckinResult(200, { success: false, message: '今日已签到' })
   assert.deepEqual([r.ok, r.already], [true, true])
+  // 站点整体没开签到：记成成功态并覆盖状态文案，否则每轮都在报表里占一条执行异常
+  r = parseCheckinResult(200, { success: false, message: '签到功能未启用' })
+  assert.deepEqual([r.ok, r.already], [true, false], '站点没开签到不该记成执行失败')
+  assert.equal(r.statusTextOverride, '跳过签到', '状态文案要说明是跳过签到')
+  assert.equal(r.msg, '不支持该站点', '批注固定为不支持该站点，不依赖站点原文')
+  assert.equal(parseCheckinResult(200, { success: false, message: '签到已关闭' }).ok, true)
+  assert.equal(parseCheckinResult(200, { success: false, message: 'Check-in is disabled' }).ok, true)
+  r = parseCheckinResult(200, { success: false, message: '余额不足' })
+  assert.equal(r.ok, false, '普通失败仍要记成失败')
+  assert.equal(r.statusTextOverride, undefined, '普通失败不得覆盖状态文案')
+
   r = parseCheckinResult(200, { success: false, message: 'Turnstile token 为空' })
   assert.match(r.msg, /Turnstile/)
   assert.equal(classifyValidation({ message: '需要完成安全验证' }), 'pow')
@@ -1145,6 +1158,17 @@ try {
   console.log('降级决策 OK')
 
   console.log('executor.randInt OK')
+
+  // ---- 跳过清单纯函数 ----
+  const { matchSkipHost } = await import('../models/executor.js')
+  assert.equal(matchSkipHost('k40.shengqainbang.cn', ['shengqainbang']), true, '子串匹配应命中')
+  assert.equal(matchSkipHost('k40.shengqainbang.cn', ['k40']), true, '前缀子串应命中')
+  assert.equal(matchSkipHost('tabitoken.com', ['shengqainbang']), false, '不含关键字不应命中')
+  assert.equal(matchSkipHost('tabitoken.com', []), false, '空清单不应跳过任何站点')
+  assert.equal(matchSkipHost('tabitoken.com', null), false, 'null 清单不应抛出异常')
+  assert.equal(matchSkipHost('tabitoken.com', ['tabitoken.com']), true, '精确 host 应命中')
+  assert.equal(matchSkipHost('tabitoken.com', ['tabitoken']), true, '子串 tabitoken 应命中')
+  console.log('跳过清单 OK')
 
   // ---- 指令正则（与 apps/checkin.js 保持一致）----
   const rules = {

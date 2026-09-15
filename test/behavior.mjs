@@ -25,8 +25,10 @@ if (hadData) fs.renameSync(DATA, backup)
 // ---- mock fetch：按 (method, url) 路由 ----
 let routes = {}
 const realFetch = global.fetch
+const networkCalls = []
 global.fetch = async (url, opts = {}) => {
   const key = `${opts.method || 'GET'} ${url}`
+  networkCalls.push(key)
   const handler = routes[key]
   if (!handler) throw new Error(`mock fetch 未定义路由: ${key}`)
   const { status = 200, body = null, capture, setCookies = [] } = typeof handler === 'function' ? handler(opts) : handler
@@ -627,6 +629,108 @@ try {
   probe = await probeAccount('https://v.com', 'VTOK', null)
   assert.equal(probe.ok, false)
   assert.match(probe.msg, /用户ID/)
+
+  // ---- 配置跳过：只查余额，不签到，不把跳过记成实际签到 ----
+  cfgNow.security.allowedPrivateHosts.push('skip-balance.test')
+  const skipConfigBefore = cfgNow.skip.hosts
+  cfgNow.skip.hosts = ['skip-balance.test']
+  try {
+    const account = {
+      name: 'skip-balance.test', baseUrl: 'https://skip-balance.test', type: 'newapi',
+      token: 'TEST_ONLY', lastBalance: '$9.00',
+      lastCheckinAt: '2000-01-01T00:00:00.000Z', lastCheckinConfirmed: false
+    }
+    routes = { 'GET https://skip-balance.test/api/user/self': {
+      body: { success: true, data: { quota: 2000000, used_quota: 0 } }
+    } }
+    networkCalls.length = 0
+    const result = await checkinAccount(account)
+    assert.equal(result.status, 'ok')
+    assert.equal(result.statusText, '跳过签到')
+    assert.equal(result.balance, '$4.00', '跳过站点仍应显示本次查询到的余额')
+    assert.deepEqual(networkCalls, ['GET https://skip-balance.test/api/user/self'])
+    assert.equal(account.lastBalance, '$4.00')
+    assert.equal(account.lastCheckinAt, '2000-01-01T00:00:00.000Z')
+    assert.equal(account.lastCheckinConfirmed, false)
+    routes = { 'GET https://skip-balance.test/api/user/self': { status: 401, body: { success: false } } }
+    assert.equal((await checkinAccount(account)).balance, '$4.00（缓存）')
+    assert.equal(account.lastBalance, '$4.00', '显示标记不能污染原始缓存')
+    assert.equal((await checkinAccount({ ...account, lastBalance: '-' })).balance, '-')
+    routes = { 'GET https://skip-balance.test/api/user/self': {
+      body: { success: true, data: { quota: 0, used_quota: 0 } }
+    } }
+    assert.equal((await checkinAccount(account)).balance, '$0.00')
+  } finally { cfgNow.skip.hosts = skipConfigBefore }
+
+  // 14个账号中3个跳过：提示统计11个，报告仍保留14条余额记录。
+  const skipEvent = { user_id: 984, self_id: 10000, isGroup: false, msg: '#中转签到', sender: { nickname: '跳过测试' } }
+  const skipStore = await import('../models/store.js')
+  const { RelayCheckinCore: SkipCore } = await import('../apps/checkin.js')
+  const { currentHost: skipCurrentHost } = await import('../host/index.js')
+  const skipEntry = skipStore.ensureEntry(skipEvent)
+  const skipAccounts = Array.from({ length: 14 }, (_, i) => ({
+    name: `skip-count-${i}.test`, baseUrl: `https://skip-count-${i}.test`,
+    type: [0, 1, 3].includes(i) ? 'sub2api' : 'newapi', token: 'TEST_ONLY',
+    siteUserId: i + 1, accessToken: 'TEST_ACCESS', tokenExpiresAt: Date.now() + 3600000,
+    auto: true, lastBalance: '$9.00'
+  }))
+  skipEntry.accounts = skipAccounts
+  cfgNow.security.allowedPrivateHosts.push(...skipAccounts.map(a => a.name))
+  cfgNow.skip.hosts = skipAccounts.slice(0, 3).map(a => a.name)
+  routes = {}
+  for (const a of skipAccounts) {
+    if (a.type === 'sub2api') {
+      routes[`GET ${a.baseUrl}/api/v1/auth/me`] = { body: { code: 0, data: { balance: 4, total_recharged: 0 } } }
+      routes[`GET ${a.baseUrl}/api/v1/checkin/status`] = { status: 404 }
+      routes[`GET ${a.baseUrl}/api/v1/check-in/status`] = { body: { code: 0, data: { enabled: true, checked_in_today: true } } }
+    } else {
+      routes[`GET ${a.baseUrl}/api/user/checkin?month=${month}`] = { body: { success: true, data: { stats: { checked_in_today: true, records: [] } } } }
+      routes[`GET ${a.baseUrl}/api/user/self`] = { body: { success: true, data: { quota: 2000000, used_quota: 0 } } }
+      routes[`GET ${a.baseUrl}/api/site/welfare/status`] = { status: 404 }
+    }
+  }
+  const skipReplies = []
+  let skipRender
+  const skipHost = skipCurrentHost()
+  installHost({ ...skipHost, renderTemplate: async (name, data) => { skipRender = data; return false } })
+  try {
+    const core = new SkipCore({ e: skipEvent, reply: async text => skipReplies.push(text) })
+    await core.checkin()
+    assert.match(skipReplies[0], /11 个账号/, '待签到数必须排除3个跳过项')
+    assert.match(skipReplies[0], /1 个站点.*耗时较长/)
+    assert.match(skipReplies[0], /3 个账号.*跳过签到.*查询余额/)
+    assert.equal(skipRender.users[0].accounts.length, 14)
+    for (const row of skipRender.users[0].accounts.slice(0, 3)) {
+      assert.equal(row.statusText, '跳过签到')
+      assert.equal(row.balance, '$4.00')
+    }
+    assert.equal(skipRender.summaryItems.find(item => item.tone === 'ok').value, 3)
+    skipReplies.length = 0
+    skipEvent.msg = '#中转签到 1'
+    await core.checkin()
+    assert.match(skipReplies[0], /跳过签到.*查询余额/)
+    assert.equal(skipRender.users[0].accounts.length, 1)
+    skipReplies.length = 0
+    skipEvent.msg = '#中转签到'
+    cfgNow.skip.hosts = skipAccounts.map(a => a.name)
+    networkCalls.length = 0
+    await core.checkin()
+    assert.match(skipReplies[0], /14 个账号.*跳过签到.*查询余额/)
+    assert.doesNotMatch(skipReplies[0], /依次签到|耗时较长/)
+    assert.ok(networkCalls.every(key => key.endsWith('/api/user/self') || key.endsWith('/api/v1/auth/me')))
+  } finally { cfgNow.skip.hosts = skipConfigBefore; installHost(skipHost) }
+
+  // AnyRouter只读余额模式不能回退到浏览器；保留默认行为。
+  const skipBrowserAdapter = (await import('../models/adapters/anyrouter.js')).default
+  const skipBrowserEnable = cfgNow.browser.enable
+  cfgNow.browser.enable = false
+  routes = { 'GET https://anyrouter.top/api/user/self': { status: 200, body: null } }
+  try {
+    const result = await skipBrowserAdapter.userInfo({ name: 'anyrouter.top', baseUrl: 'https://anyrouter.top', token: 'TEST' }, { allowBrowser: false })
+    assert.equal(result.ok, false)
+    assert.match(result.msg, /本次不打开浏览器/)
+  } finally { cfgNow.browser.enable = skipBrowserEnable }
+  console.log('跳过余额、进度与浏览器保护 OK')
 
   // ---- 6. 网络错误重试后抛出，executor 兜底为失败结果 ----
   routes = {}

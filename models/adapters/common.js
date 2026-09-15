@@ -375,6 +375,12 @@ export function parseCheckinResult(status, json, meta = {}) {
     const award = json.data?.quota_awarded ?? json.data?.quota ?? json.quota_awarded ?? json.quota ?? null
     return { ok: true, already: false, msg: msg || '签到成功', awardQuota: award }
   }
+  // 站点整体没开签到：不是执行失败，也没有可签的东西（签到功能未启用/已关闭/搬到别处）。
+  // 记成成功态并覆盖状态文案，避免每轮都在报表里占一条异常；原始原因仅记录日志，展示使用统一批注。
+  if (/签到功能未启用|签到未启用|签到功能已关闭|签到已关闭|未开启签到|签到功能未开启|check-?in (?:is )?(?:not enabled|disabled)/i.test(msg)) {
+    logger.info(`[relay-checkin-plugin] 站点签到功能未开启（${msg}），标记为跳过签到`)
+    return { ok: true, already: false, statusTextOverride: '跳过签到', msg: '不支持该站点' }
+  }
   if (/已签|签过|重复签|already/i.test(msg)) {
     return { ok: true, already: true, msg: '今日已签到' }
   }

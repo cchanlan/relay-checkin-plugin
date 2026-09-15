@@ -134,7 +134,8 @@ export default {
     return checkin
   },
 
-  async userInfo(account) {
+  async userInfo(account, { allowBrowser = true } = {}) {
+    const fallback = allowBrowser ? '走浏览器取 WAF cookie' : '本次不打开浏览器'
     // 先快速试一次纯 HTTP（个别镜像站无 WAF，或缓存 cookie 已够用）
     const cached = getCached(new URL(account.baseUrl).hostname)
     try {
@@ -144,11 +145,12 @@ export default {
         maxRetry: 0
       })
       if (json?.success) return parseUserInfo(json)
-      logger.info(`[relay-checkin-plugin] anyrouter 纯 HTTP 探测未通过 (HTTP ${status}${json ? `, message=${json.message || '无'}` : ', 非 JSON 响应'})，走浏览器取 WAF cookie`)
+      logger.info(`[relay-checkin-plugin] anyrouter 纯 HTTP 探测未通过 (HTTP ${status}${json ? `, message=${json.message || '无'}` : ', 非 JSON 响应'})，${fallback}`)
     } catch (err) {
-      logger.info(`[relay-checkin-plugin] anyrouter 纯 HTTP 探测失败（${err.message}），走浏览器取 WAF cookie`)
+      logger.info(`[relay-checkin-plugin] anyrouter 纯 HTTP 探测失败（${err.message}），${fallback}`)
     }
 
+    if (!allowBrowser) return { ok: false, msg: '余额查询需要网页验证，本次不打开浏览器' }
     const res = await this.apiCall(account, '/api/user/self')
     if (res.failed) return { ok: false, msg: res.failed }
     return parseUserInfo(res.json)
