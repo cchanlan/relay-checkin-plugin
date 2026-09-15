@@ -84,6 +84,7 @@ try {
     newPageSafe,
     turnstileBrowserMode,
     browserExecutableVersion,
+    isSnapBrowser,
     staleTurnstileKernel
   } = await import('../models/browser.js')
   assert.equal(
@@ -124,6 +125,43 @@ try {
     exists: candidate => candidate === fakeChrome || candidate === fakeEdge,
     versionOf: candidate => candidate === fakeEdge ? '151.0.1.0' : '129.0.1.0'
   }), fakeEdge, 'Windows 应自动选择版本最高的系统 Chrome/Edge')
+  const snapPaths = new Set(['/usr/bin/chromium-browser', '/snap/bin/chromium'])
+  const linuxResolve = extra => resolveBrowserExecutable('', {
+    platform: 'linux',
+    exists: candidate => candidate === '/usr/bin/google-chrome' || snapPaths.has(candidate),
+    versionOf: candidate => snapPaths.has(candidate) ? '152.0.7977.64' : '150.0.7871.46',
+    isSnap: candidate => snapPaths.has(candidate),
+    ...extra
+  })
+  assert.equal(
+    linuxResolve(),
+    '/usr/bin/google-chrome',
+    'snap 版 Chromium 读不到本插件的档案目录，版本再高也要让位给 deb 版 Chrome'
+  )
+  assert.equal(
+    linuxResolve({ exists: candidate => snapPaths.has(candidate) }),
+    '/usr/bin/chromium-browser',
+    '系统上只有 snap 版时仍要返回它，总比完全没有浏览器好'
+  )
+  assert.ok(
+    isSnapBrowser('/snap/bin/chromium', { realpath: () => { throw new Error('ENOENT') }, readHead: () => '' }),
+    '/snap 下的路径应直接判定为 snap 版'
+  )
+  assert.ok(
+    isSnapBrowser('/usr/bin/chromium-browser', {
+      realpath: target => target,
+      readHead: () => '#!/bin/sh\nif ! [ -x /snap/bin/chromium ]; then\nexit 1\nfi\n'
+    }),
+    'Ubuntu 转发到 snap 的 /usr/bin/chromium-browser 脚本必须认出来'
+  )
+  assert.equal(
+    isSnapBrowser('/usr/bin/google-chrome', {
+      realpath: () => '/opt/google/chrome/google-chrome',
+      readHead: () => '\x7fELF\x02\x01\x01'
+    }),
+    false,
+    'deb 版 Chrome 不应被误判成 snap'
+  )
   assert.equal(browserExecutableVersion(fakeEdge, {
     platform: 'win32',
     spawn: (command, args) => {
@@ -401,11 +439,16 @@ try {
     pointerPath,
     nativeClick,
     nativePointerUnavailable,
+    needsVirtualDisplay,
     xdotoolWindowSearchArgs,
     windowsClickCommand,
     windowsWindowGeometryCommand
   } = await import('../models/native.js')
-  const { detachedClickOrigin, detachedWidgetClickPoint } = await import('../models/browser.js')
+  const {
+    detachedClickOrigin,
+    detachedWidgetClickPoint,
+    interactiveTakeoverBlockReason
+  } = await import('../models/browser.js')
 
   assert.equal(pointerDisplayFor(':99'), ':99', '自建虚拟屏优先')
   assert.equal(
@@ -419,6 +462,36 @@ try {
   )
   assert.equal(pointerDisplayFor(null, { platform: 'linux', env: {} }), '', '无桌面且无虚拟屏只能手动点')
   assert.equal(pointerDisplayFor(null, { platform: 'darwin', env: {} }), '', 'macOS 没有可用的原生指针工具')
+
+  // 窗口开在哪块屏上，决定了「缺 xdotool」是退回人工还是彻底走不通
+  assert.equal(needsVirtualDisplay({ platform: 'linux', env: {} }), true, '无桌面的 Linux 只能自建虚拟屏')
+  assert.equal(
+    needsVirtualDisplay({ platform: 'linux', env: { DISPLAY: ':0' } }), false,
+    '已有 X 桌面时窗口开在用户看得见的屏上'
+  )
+  assert.equal(
+    needsVirtualDisplay({ platform: 'linux', env: { WAYLAND_DISPLAY: 'wayland-0' } }), false,
+    'Wayland 桌面同样是用户看得见的屏'
+  )
+  assert.equal(needsVirtualDisplay({ platform: 'win32', env: {} }), false, 'Windows 不存在自建虚拟屏的情况')
+  const blockedReason = interactiveTakeoverBlockReason({ virtualScreen: true, pointerAvailable: false })
+  assert.match(
+    blockedReason, /xdotool/,
+    '虚拟屏里的窗口没人点得到，缺 xdotool 必须直接停下并给出安装办法，而不是等用户手动勾选'
+  )
+  assert.equal(
+    interactiveTakeoverBlockReason({ virtualScreen: true, pointerAvailable: false }),
+    blockedReason,
+    '同一环境下的拦截原因应当稳定，便于上层直接当失败原因回给用户'
+  )
+  assert.equal(
+    interactiveTakeoverBlockReason({ virtualScreen: true, pointerAvailable: true }), '',
+    '虚拟屏 + 有 xdotool 是正常的自动勾选路径，不能拦'
+  )
+  assert.equal(
+    interactiveTakeoverBlockReason({ virtualScreen: false, pointerAvailable: false }), '',
+    '本机有桌面时缺指针工具仍可由用户手动勾选，不能拦'
+  )
   assert.deepEqual(
     xdotoolWindowSearchArgs('relay-checkin tabitoken.com', 12345),
     [

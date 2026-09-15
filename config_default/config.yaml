@@ -43,6 +43,8 @@ security:
 browser:
   enable: true
   # 浏览器程序路径；留空时自动选择版本最高的系统 Chrome/Edge，找不到才使用 Puppeteer 自带 Chromium
+  # snap 版 Chromium（含 Ubuntu 转发脚本 /usr/bin/chromium-browser）会被跳过：它被 AppArmor
+  # 关在 $HOME/snap 内，读写不了本插件的浏览器档案目录，只会报 SingletonLock: Permission denied
   # Turnstile 要求浏览器保持较新，旧版 TRSS-Yunzai 建议显式填写最新版 Chrome 路径
   # Linux: /usr/bin/google-chrome    Windows: C:\Program Files\Google\Chrome\Application\chrome.exe
   executablePath: ""
@@ -53,6 +55,8 @@ browser:
   # 是否在机器人运行设备上直接打开可见浏览器处理 Turnstile
   # 可见窗口使用独立持久档案，断开调试连接后由系统真实指针自动勾选复选框
   # Windows 和有桌面的机器直接用本机指针，无桌面 Linux 会自动拉起 Xvfb + xdotool；关闭后才使用无头模式
+  # 无桌面 Linux 必须先装好 xdotool（apt install xdotool）：虚拟屏里的窗口没人看得见，
+  # 缺了它谁也勾选不了，此时插件会直接跳过验证并提示安装，而不是白等一个超时
   turnstileInteractive: true
   # 等待可见浏览器完成 Turnstile 的最长时间（秒），范围 30~600
   turnstileInteractiveTimeoutSec: 120

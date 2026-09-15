@@ -61,12 +61,21 @@ let psExecutable = null
  * 期间才安装，不能把一次 ENOENT 永久当成不可用；nativePointerUnavailable() 会刷新状态。
  */
 let pointerUnavailable = false
+let pointerProbed = false
 
 function refreshPointerAvailability() {
-  if (!pointerUnavailable || process.platform !== 'linux') return
+  if (process.platform !== 'linux') return
+  // 已判定不可用时每次都复查（用户可能中途装上）；从未判定过时也要先探一次，
+  // 否则在第一次点击之前谁都不知道 xdotool 在不在，启动前的可行性检查就无从下手
+  if (!pointerUnavailable && pointerProbed) return
   // 只探测可执行文件是否已经出现，不连接 X server，避免 DISPLAY 不可用时误判。
   const probe = spawnSync('xdotool', ['-h'], { stdio: 'ignore' })
-  if (!probe.error || probe.error.code !== 'ENOENT') pointerUnavailable = false
+  pointerProbed = true
+  if (probe.error?.code === 'ENOENT') {
+    markPointerUnavailable('未安装 xdotool（Debian / Ubuntu 执行 apt install xdotool）')
+  } else {
+    pointerUnavailable = false
+  }
 }
 
 export function nativePointerUnavailable() {
@@ -74,10 +83,11 @@ export function nativePointerUnavailable() {
   return pointerUnavailable
 }
 
+// 能不能改由人手动勾选，取决于窗口开在哪块屏上，这里判断不了，交给调用方去说
 function markPointerUnavailable(reason) {
   if (pointerUnavailable) return
   pointerUnavailable = true
-  logger.warn(`[relay-checkin-plugin] ${reason}，无法自动勾选人机验证（可在弹出的窗口中手动勾选）`)
+  logger.warn(`[relay-checkin-plugin] ${reason}，无法自动勾选人机验证`)
 }
 
 function psCandidates() {
@@ -366,6 +376,18 @@ export function pointerDisplayFor(virtualDisplay, { platform = process.platform,
   if (platform === 'win32') return POINTER_WINDOWS
   if (platform !== 'linux') return ''
   return env.DISPLAY || ''
+}
+
+/**
+ * 人机验证窗口是否只能开在本插件自建的虚拟屏里。
+ *
+ * 与 browser.js 的 ensureVirtualDisplay() 判据保持一致，但没有任何副作用，
+ * 于是「启动浏览器之前」就能知道窗口将开在哪儿。返回 true 意味着窗口生在
+ * Xvfb 上：屏幕不接显示器、用户看不见也点不到，勾选只能靠 xdotool。
+ */
+export function needsVirtualDisplay({ platform = process.platform, env = process.env } = {}) {
+  if (platform !== 'linux') return false
+  return !env.DISPLAY && !env.WAYLAND_DISPLAY
 }
 
 // CommandLine 可能为空（系统进程），制表符分隔比 CSV / JSON 都好解析。

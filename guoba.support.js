@@ -137,7 +137,7 @@ const schemas = [
   input(
     'browser.executablePath',
     '浏览器路径',
-    '留空自动选择版本最高的系统 Chrome/Edge，找不到才用 Puppeteer 自带 Chromium。Turnstile 要求浏览器较新，旧版 TRSS-Yunzai 建议显式填最新版 Chrome 路径',
+    '留空自动选择版本最高的系统 Chrome/Edge（跳过 snap 版 Chromium，它读不到本插件的档案目录），找不到才用 Puppeteer 自带 Chromium。Turnstile 要求浏览器较新，旧版 TRSS-Yunzai 建议显式填最新版 Chrome 路径',
     process.platform === 'win32'
       ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
       : '/usr/bin/google-chrome'
@@ -153,7 +153,8 @@ const schemas = [
     'browser.turnstileInteractive',
     '可见浏览器过 Turnstile',
     '在机器人运行设备上直接打开可见浏览器处理 Turnstile（独立持久档案，断开调试连接后由系统真实指针自动勾选）。'
-    + 'Windows 与有桌面的机器直接用本机指针，无桌面 Linux 会自动拉起 Xvfb + xdotool。关闭后才使用无头模式'
+    + 'Windows 与有桌面的机器直接用本机指针，无桌面 Linux 会自动拉起 Xvfb + xdotool，'
+    + '需先执行 apt install xdotool（虚拟屏里的窗口没人看得见，缺了它会直接跳过验证并提示安装）。关闭后才使用无头模式'
   ),
   num('browser.turnstileInteractiveTimeoutSec', '可见接管超时', {
     min: 30,
