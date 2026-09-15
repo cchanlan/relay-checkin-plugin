@@ -4,10 +4,11 @@ import generic from './generic.js'
 import agentrouter from './agentrouter.js'
 import anyrouter from './anyrouter.js'
 import sub2api from './sub2api.js'
+import mint from './mint.js'
 import { request } from './common.js'
 import { normalizeAndValidateBaseUrl } from '../url-security.js'
 
-const adapters = { newapi, veloera, generic, agentrouter, anyrouter, sub2api }
+const adapters = { newapi, veloera, generic, agentrouter, anyrouter, sub2api, mint }
 
 export function getAdapter(type) {
   return adapters[type] || newapi
@@ -16,21 +17,33 @@ export function getAdapter(type) {
 /**
  * Cookie 方式添加时按域名选择适配器
  * AgentRouter 官方域名：agentrouter.org 及 *.air-outer.com（如 ps.air-outer.com）
+ * 薄荷公益站：up.x666.me（linux.do OAuth，只认 auth_token cookie）
  */
 export function cookieTypeForHost(host) {
   if (/agentrouter|air-outer/i.test(host)) return 'agentrouter'
   if (/anyrouter/i.test(host)) return 'anyrouter'
+  if (isMintHost(host)) return 'mint'
   return 'generic'
 }
 
 /**
+ * 薄荷站域名判断。主站 up.x666.me 是签到面板；x666.me 是它的 api 站，
+ * 两者共用同一套 auth_token，用户贴进来的地址以面板域名为主。
+ */
+export function isMintHost(host) {
+  return /(^|\.)x666\.me$/i.test(String(host || ''))
+}
+
+/**
  * 需要专用凭据流程的站点：令牌入口不能正确完成 AnyRouter/AgentRouter 绑定。
+ * 薄荷没有令牌与邮箱密码登录，只认 auth_token cookie，走令牌入口必然失败；
  * 普通 new-api/Veloera 站点返回 null，继续走令牌自动探测。
  */
 export function preferredBindingForHost(host) {
   const type = cookieTypeForHost(host)
   if (type === 'anyrouter') return 'cookie'
   if (type === 'agentrouter') return 'email'
+  if (type === 'mint') return 'cookie'
   return null
 }
 

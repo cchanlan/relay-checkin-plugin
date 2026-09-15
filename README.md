@@ -2,7 +2,7 @@
 
 中转站自动签到插件。手动签到 / 每日定时 / 余额查询，结果出图，数据按用户隔离，群内所有人可用。
 
-支持 **new-api、Veloera 及同源魔改站、AnyRouter、AgentRouter、Sub2API**，站点类型自动识别。
+支持 **new-api、Veloera 及同源魔改站、AnyRouter、AgentRouter、Sub2API、薄荷公益站**，站点类型自动识别。
 宿主支持 **TRSS-Yunzai**（OneBot v11）与 **[Yunzai NG](https://github.com/Yunzai-NG/yunzai-ng)**。
 
 > **本仓库是 Fork**，上游 [Cat-bl/relay-checkin-plugin](https://github.com/Cat-bl/relay-checkin-plugin)；
@@ -12,6 +12,7 @@
 
 - 同一份代码兼容 Yunzai NG（宿主依赖收进 `host/` 适配层）
 - 新增 **Sub2API** 站点与 `#中转添加刷新令牌`：邮箱密码或 refresh_token 绑定，续期不开浏览器
+- 新增 **薄荷公益站**（up.x666.me）：`#中转添加cookie 地址 auth_token值` 绑定，签到即转盘抽奖，奖励按「次」展示
 - **Turnstile 改为断开调试连接后由页面自治过码**（CDP 连着必被判自动化），三个平台都能自动勾选：
   Windows 走 user32 真实指针，有桌面的用本机指针，无桌面 Linux 自动拉 Xvfb + xdotool
 - **图形验证码自动识别**（ddddocr），答错自动换码重试
@@ -106,6 +107,7 @@ NG 侧另有面板配置与 `ctx.cron` 定时（改 cron 立即生效），出�
 ```
 #中转添加 站点地址 [令牌]        令牌绑定，群里可只发地址、私聊补令牌
 #中转添加cookie 站点地址 session  只认网页会话的魔改站
+#中转添加cookie 站点地址 auth_token值   薄荷公益站（up.x666.me），签到带转盘抽奖
 #中转添加邮箱 站点地址 邮箱 密码   AgentRouter / Sub2API
 #中转添加刷新令牌 站点地址 令牌     Sub2API，过不去码时用
 
@@ -136,6 +138,19 @@ NG 侧另有面板配置与 `ctx.cron` 定时（改 cron 立即生效），出�
 - 领取POST始终单次；响应丢失时只复查状态，无法确认则显示“抽奖未确认”。
 - 没有福利接口的站点保持原展示，探测结果缓存6小时；临时网络错误不会永久禁用探测。
 - 如果同时配置了跳过清单，命中的账号不执行每日抽奖；余额查询、账号列表不会触发抽奖。
+
+## 薄荷公益站
+
+站点签到接口本身就是转盘抽奖（`POST /api/checkin/spin`，无请求体），一次调用即完成签到与抽奖，
+所以只显示一条记录，奖励与余额都按页面的「次」为单位展示。
+
+它没有访问令牌，也不支持邮箱密码登录，登录入口只有 linux.do OAuth，因此绑定方式与其他站不同：
+
+1. 在浏览器登录站点，按 F12 → Application → Cookies → `https://up.x666.me`，
+   找到名为 **`auth_token`** 的那条，复制它的值（一长串 JWT，别带 `auth_token=` 前缀）；
+2. 发送 `#中转添加cookie 站点地址 auth_token值`（也可只发地址，群里发地址后私聊补发这个值）。
+
+`auth_token` 与登录会话同寿命，过期后签到会提示重新登录并重新贴一次。
 
 ## 配置
 

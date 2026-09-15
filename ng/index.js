@@ -76,7 +76,7 @@ function registerCron(ctx) {
 
 export default definePlugin({
   name: 'relay-checkin',
-  description: '中转站（new-api / Veloera / AnyRouter / AgentRouter / Sub2API）自动签到与余额查询',
+  description: '中转站（new-api / Veloera / AnyRouter / AgentRouter / Sub2API / 薄荷）自动签到与余额查询',
   homepage: 'https://github.com/cchanlan/relay-checkin-plugin',
   configSchema,
 

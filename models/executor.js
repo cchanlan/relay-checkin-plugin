@@ -7,6 +7,7 @@ import { getConfig } from './config.js'
 import { accountLabel, persist } from './store.js'
 import { logger } from '../host/index.js'
 import { claimDailyLottery } from './daily-lottery.js'
+import { formatTimes } from './adapters/mint.js'
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -379,6 +380,30 @@ export async function checkinAccount(account) {
 }
 
 /**
+ * 薄荷的签到接口本身就把转盘抽奖一起做了，结果里已经带着奖励次数与余额，
+ * 因此不追加独立活动行，只把签到行的展示改成「次」为单位。
+ */
+function applyMintResult(account, r, result) {
+  const mint = r.mint
+  const total = [mint.awardQuota, mint.bonusQuota]
+    .filter(value => typeof value === 'number' && Number.isFinite(value))
+    .reduce((sum, value) => sum + value, 0)
+  const times = formatTimes(total)
+  if (times) result.award = `${r.already ? '今日 +' : '+'}${times} 次`
+  if (mint.newBalance != null) {
+    const balance = formatTimes(mint.newBalance)
+    if (balance) result.balance = balance
+  }
+  // 批注只写用户看得懂的结果：爆大奖、抽到的档位、连签天数
+  const notes = []
+  if (mint.pityHit) notes.push('必出大奖')
+  if (mint.label) notes.push(mint.label)
+  if (mint.streakDays > 1) notes.push(`连签 ${mint.streakDays} 天`)
+  if (notes.length) result.msg = notes.join('，')
+  return result
+}
+
+/**
  * 成功行的批注是不是只在复述状态列。只认纯状态词，带了额外内容（奖励明细、
  * 「但缺少 xx 字段」这类提醒）的一律保留。
  */
@@ -431,6 +456,8 @@ export function finalizeCheckinResult(account, r, { beforeInfo = null, afterInfo
     }
     // 组合展示汇总绿字奖励用：保留原始 quota，避免解析已格式化的金额字符串
     result.awardQuotaValue = r.awardText == null ? (r.awardQuota ?? null) : null
+    // 薄荷的奖励单位是「次」而非美元，且签到响应自带转盘结果，单独渲染这一行
+    if (r.mint) applyMintResult(account, r, result)
   } else {
     result.status = 'fail'
     result.statusText = STATUS_TEXT.fail

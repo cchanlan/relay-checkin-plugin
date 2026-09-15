@@ -1,7 +1,7 @@
 import { getConfig } from '../models/config.js'
 import { matchSkipHost } from '../models/checkin-policy.js'
 import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist, setPushGroup, rememberGroup } from '../models/store.js'
-import { probeAccount, probeSessionAccount, probeSub2apiSite, normalizeBaseUrl, getAdapter, cookieTypeForHost, preferredBindingForHost } from '../models/adapters/index.js'
+import { probeAccount, probeSessionAccount, probeSub2apiSite, normalizeBaseUrl, getAdapter, cookieTypeForHost, preferredBindingForHost, isMintHost } from '../models/adapters/index.js'
 import { checkinEntry, checkinAccountResults, combineCheckinResults, queryEntry, refreshBalances } from '../models/executor.js'
 import { withUserLock } from '../models/lock.js'
 import { renderResult, renderList, renderHelp, formatResultRows } from '../models/render.js'
@@ -93,6 +93,9 @@ function emailPasswordLabel(site) {
 
 function specializedBindingHint(site) {
   const kind = preferredBindingForHost(site?.host)
+  if (isMintHost(site?.host)) {
+    return `检测到 ${site.host} 是薄荷公益站，它没有访问令牌，只能用 auth_token 签到。\n请先在浏览器登录 ${site.baseUrl} ，然后把 Cookie 里的 auth_token 值私聊发给我：\n#中转添加cookie ${site.baseUrl}\n随后私聊发送：auth_token值`
+  }
   if (kind === 'cookie') {
     return `检测到 ${site.host} 是 AnyRouter，请不要使用“#中转添加 令牌”。请改用：\n#中转添加cookie ${site.baseUrl}\n随后私聊发送：session值 用户ID`
   }
@@ -235,7 +238,7 @@ export const COMMAND_RULES = [
   { reg: '^#中转(?:站)?添加邮箱\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addEmail', desc: '邮箱登录绑定（AgentRouter / Sub2API）' },
   // 与「添加」规则互不冲突（那条要求 添加 后紧跟空格），仍与同族指令排在一起便于维护
   { reg: '^#中转(?:站)?添加刷新令牌\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addRefresh', desc: '刷新令牌绑定（Sub2API）' },
-  { reg: '^#中转(?:站)?添加[cC]ookie\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addCookie', desc: 'Cookie 绑定（AnyRouter / 旧版站点）' },
+  { reg: '^#中转(?:站)?添加[cC]ookie\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addCookie', desc: 'Cookie 绑定（AnyRouter / 薄荷 / 旧版站点）' },
   { reg: '^#中转(?:站)?添加\\s+\\S+(?:\\s+\\S+)*$', fnc: 'add', desc: '令牌绑定，自动识别站点类型' },
   { reg: '^#中转(?:站)?列表$', fnc: 'list', desc: '我的账号列表' },
   { reg: '^#中转(?:站)?删除\\s*(\\d+)$', fnc: 'remove', desc: '删除指定序号的账号' },
@@ -323,7 +326,7 @@ export class RelayCheckinCore {
 
   async help() {
     const img = await renderHelp()
-    await this.replyImage(img, '帮助图渲染失败，指令：#中转添加 地址 / #中转添加邮箱 地址（AgentRouter、Sub2API）/ #中转列表 / #中转删除 序号 / #中转签到 [序号] / #中转查询 / #中转定时 开|关 [序号]')
+    await this.replyImage(img, '帮助图渲染失败，指令：#中转添加 地址 / #中转添加cookie 地址 auth_token值（薄荷）/ #中转添加邮箱 地址（AgentRouter、Sub2API）/ #中转列表 / #中转删除 序号 / #中转签到 [序号] / #中转查询 / #中转定时 开|关 [序号]')
     return true
   }
 
@@ -376,7 +379,31 @@ export class RelayCheckinCore {
    * @returns {Promise<{ok, msg?, account?, info?}>}
    */
   async verifyCookie(site, rawSession, siteUserId) {
-    const token = String(rawSession).replace(/^session=/i, '')
+    // 薄荷的 cookie 名是 auth_token，用户可能连 "auth_token=" 一起贴进来；其余站点贴的是 session
+    const isMint = isMintHost(site.host)
+    const token = String(rawSession).replace(isMint ? /^auth_token=/i : /^session=/i, '')
+    // 薄荷没有 new-api 的 /api/user/self，探测必然 404，直接按域名规则校验
+    if (isMint) {
+      const account = {
+        name: site.host,
+        baseUrl: site.baseUrl,
+        type: 'mint',
+        authMode: 'session',
+        token,
+        loginEmail: null,
+        password: null,
+        siteUserId: null,
+        signPath: null,
+        auto: true
+      }
+      try {
+        const info = await guardHang(getAdapter('mint').userInfo(account), '验证账号')
+        if (!info.ok) return { ok: false, msg: `${info.msg}（请重新登录后复制新的 auth_token）` }
+        return { ok: true, account, info }
+      } catch (err) {
+        return { ok: false, msg: err.message }
+      }
+    }
     // NewAPI 魔改站（如 jianzhile.vip）的签到/验证码接口只认网页会话：
     // session 能直接过 /api/user/self 就按 new-api 会话账号处理，走 /api/user/checkin。
     try {
@@ -573,11 +600,15 @@ export class RelayCheckinCore {
    * 「中转绑定 凭据」格式私聊发送，否则提示替代方案且不登记会话
    */
   async startBind(kind, site) {
-    const fullCmd = {
-      cookie: `#中转添加cookie ${site.host} session值 用户ID`,
-      email: `#中转添加邮箱 ${site.host} 邮箱 ${emailPasswordLabel(site)}`,
-      refresh: `#中转添加刷新令牌 ${site.host} 刷新令牌`
-    }[kind] || `#中转添加 ${site.host} 令牌`
+    // 薄荷没有站点用户ID，提示文案与 AnyRouter 不同（只贴一个 auth_token）
+    const mintBind = kind === 'cookie' && isMintHost(site.host)
+    const fullCmd = mintBind
+      ? `#中转添加cookie ${site.host} auth_token值`
+      : {
+        cookie: `#中转添加cookie ${site.host} session值 用户ID`,
+        email: `#中转添加邮箱 ${site.host} 邮箱 ${emailPasswordLabel(site)}`,
+        refresh: `#中转添加刷新令牌 ${site.host} 刷新令牌`
+      }[kind] || `#中转添加 ${site.host} 令牌`
     const block = await getPrivateBlock(this.e)
     if (block && !block.passable) {
       if (this.e.isGroup) {
@@ -620,7 +651,9 @@ export class RelayCheckinCore {
     pendingBinds.set(key, pending)
 
     const need = {
-      cookie: 'session值 用户ID（空格分隔）',
+      cookie: isMintHost(site.host)
+        ? 'auth_token值（在浏览器登录该站点后按 F12，在 Application → Cookies 里复制 auth_token 的值）'
+        : 'session值 用户ID（空格分隔）',
       email: `邮箱 ${emailPasswordLabel(site)}（空格分隔）`,
       // 站点没有可复制的「令牌」入口，必须告诉用户去哪取，否则根本无从下手
       refresh: '刷新令牌（在电脑浏览器登录该站点后按 F12，在 Console 执行：'
@@ -736,6 +769,25 @@ export class RelayCheckinCore {
     await this.recallIfGroup()
     if (!site) {
       await this.reply('站点地址格式不正确或被安全策略拒绝，请填写 HTTPS 站点根地址，例如：#中转添加cookie https://xx.com session值 用户ID')
+      return true
+    }
+    // 薄荷没有站点用户ID，只认一个 auth_token，所以这里只收两段参数
+    if (isMintHost(site.host)) {
+      if (args.length !== 2) {
+        await this.reply(args.length > 2
+          ? '参数过多：#中转添加cookie 地址 auth_token值'
+          : '缺少 auth_token，格式：#中转添加cookie 地址 auth_token值（或只发地址走私聊绑定）')
+        return true
+      }
+      await this.runLocked('添加账号', async () => {
+        await this.reply('正在验证账号，请稍候...')
+        const r = await this.verifyCookie(site, args[1], null)
+        if (!r.ok) {
+          await this.reply(`添加失败：${r.msg}`)
+          return
+        }
+        await this.saveAccount(r.account, r.info)
+      })
       return true
     }
     if (args.length !== 3) {
@@ -896,7 +948,14 @@ export class RelayCheckinCore {
       }
       return false
     }
-    if (pending.kind === 'cookie' && parts.length !== 2) {
+    // 薄荷没有站点用户ID，只发一个 auth_token 就够
+    const mintBind = pending.kind === 'cookie' && isMintHost(pending.host)
+    if (mintBind && parts.length !== 1) {
+      const fmt = prefixed ? '中转绑定 auth_token值' : 'auth_token值'
+      await this.reply(`请只发送一个值：${fmt}（在浏览器登录后从 Cookie 里复制 auth_token）`)
+      return true
+    }
+    if (pending.kind === 'cookie' && !mintBind && parts.length !== 2) {
       // 用户走「中转绑定」前缀（disablePrivate 放行）时，重发也必须带前缀才不被拦截
       const fmt = prefixed ? '中转绑定 session值 用户ID' : 'session值 用户ID'
       await this.reply(`请一次性发送：${fmt}（空格分隔，不能多填参数）`)
@@ -932,7 +991,7 @@ export class RelayCheckinCore {
         await this.reply('正在验证账号，请稍候...')
         let r
         if (pending.kind === 'cookie') {
-          r = await this.verifyCookie(site, parts[0], parts[1])
+          r = await this.verifyCookie(site, parts[0], parts[1] ?? null)
         } else if (pending.kind === 'email') {
           r = await this.verifyEmail(site, parts[0], parts[1])
         } else if (pending.kind === 'refresh') {

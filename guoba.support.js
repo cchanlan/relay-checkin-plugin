@@ -243,7 +243,7 @@ export function supportGuoba() {
       link: 'https://github.com/Cat-bl/relay-checkin-plugin',
       isV3: true,
       isV2: false,
-      description: 'new-api / Veloera / AnyRouter / AgentRouter 中转站自动签到与余额查询',
+      description: 'new-api / Veloera / AnyRouter / AgentRouter / 薄荷 中转站自动签到与余额查询',
       icon: 'mdi:calendar-check',
       iconColor: '#78b4ff'
     },
