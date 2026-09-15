@@ -2,9 +2,9 @@ import { getConfig } from '../models/config.js'
 import { matchSkipHost } from '../models/checkin-policy.js'
 import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist, setPushGroup, rememberGroup } from '../models/store.js'
 import { probeAccount, probeSessionAccount, probeSub2apiSite, normalizeBaseUrl, getAdapter, cookieTypeForHost, preferredBindingForHost } from '../models/adapters/index.js'
-import { checkinEntry, checkinAccount, finalizeCheckinResult, queryEntry, refreshBalances } from '../models/executor.js'
+import { checkinEntry, checkinAccountResults, combineCheckinResults, queryEntry, refreshBalances } from '../models/executor.js'
 import { withUserLock } from '../models/lock.js'
-import { renderResult, renderList, renderHelp } from '../models/render.js'
+import { renderResult, renderList, renderHelp, formatResultRows } from '../models/render.js'
 import { browserHangBudgetMs } from '../models/browser.js'
 import { logger, pickBot, segment, defaultSelfId } from '../host/index.js'
 
@@ -951,14 +951,14 @@ export class RelayCheckinCore {
           return
         }
 
-        const { entry, statusText, checkinRow, balance, image } = await this.saveAccount(r.account, r.info, r.initialCheckin)
+        const { entry, resultRow, image } = await this.saveAccount(r.account, r.info, r.initialCheckin)
         // 群里发起的绑定：保留最近使用群信息（私聊补发凭据时事件里没有群号）
         if (pending.groupId) {
           rememberGroup(entry, pending.groupId)
           persist()
         }
         await recallBindPrompt(pending)
-        await notifyBindGroup(pending, `中转站 ${accountLabel(r.account)} ${statusText}，余额 ${balance}，${checkinRow.statusText}`, image)
+        await notifyBindGroup(pending, formatResultRows([resultRow]), image)
       })
     } catch (err) {
       // 未预见的异常也要回执，否则表现为「发了凭据没反应」
@@ -997,11 +997,9 @@ export class RelayCheckinCore {
     const { entry, updated, account: stored } = upsertAccount(this.e, account)
     const statusText = updated ? '已更新凭据' : '添加成功'
 
-    let checkinRow
+    let rows
     try {
-      checkinRow = initialCheckin
-        ? finalizeCheckinResult(stored, initialCheckin, { afterInfo: info })
-        : await guardHang(checkinAccount(stored), '签到')
+      rows = await guardHang(checkinAccountResults(stored, { initialCheckin, info }), '签到')
       // 缓存落盘失败不能让一次成功的签到被报成失败
       try {
         persist()
@@ -1009,18 +1007,20 @@ export class RelayCheckinCore {
         logger.error(`[relay-checkin-plugin] 状态缓存落盘失败: ${err?.message || err}`)
       }
     } catch (err) {
-      checkinRow = {
+      rows = [{
         name: accountLabel(stored), status: 'fail', statusText: '签到失败',
         award: '', balance: info.balanceText, msg: err.message
-      }
+      }]
     }
-    const balance = checkinRow.balance !== '-' ? checkinRow.balance : info.balanceText
+    const [checkinRow, ...activityRows] = rows
+    const combinedRow = combineCheckinResults(rows)
+    const balance = combinedRow.balance !== '-' ? combinedRow.balance : info.balanceText
     const mergedRow = {
-      ...checkinRow,
+      ...combinedRow,
       name: accountLabel(stored),
       statusText: `${statusText} / ${checkinRow.statusText || '签到结果未知'}`,
       balance,
-      msg: checkinRow.msg || ''
+      msg: combinedRow.msg || ''
     }
 
     const img = await renderResult({
@@ -1031,8 +1031,8 @@ export class RelayCheckinCore {
         accounts: [mergedRow]
       }]
     })
-    await this.replyImage(img, `${statusText}：${accountLabel(stored)}，余额 ${balance}，${checkinRow.statusText}${checkinRow.msg ? `（${checkinRow.msg}）` : ''}`)
-    return { entry, statusText, checkinRow, balance, image: img }
+    await this.replyImage(img, formatResultRows([mergedRow]))
+    return { entry, statusText, checkinRow, activityRows, balance, image: img, resultRow: mergedRow }
   }
 
   async list() {
@@ -1090,7 +1090,7 @@ export class RelayCheckinCore {
         title: '中转站签到',
         users: [{ nickname: entry.nickname, userId: entry.userId, accounts: results }]
       })
-      await this.replyImage(img, results.map(r => `${r.name}: ${r.statusText}${r.msg ? ` (${r.msg})` : ''}`).join('\n'))
+      await this.replyImage(img, formatResultRows(results))
     })
     return true
   }

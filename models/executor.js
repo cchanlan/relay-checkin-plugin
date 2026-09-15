@@ -6,6 +6,7 @@ import { ocrCaptcha } from './ocr.js'
 import { getConfig } from './config.js'
 import { accountLabel, persist } from './store.js'
 import { logger } from '../host/index.js'
+import { claimDailyLottery } from './daily-lottery.js'
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -428,6 +429,8 @@ export function finalizeCheckinResult(account, r, { beforeInfo = null, afterInfo
     if (value != null) {
       result.award = r.already ? `今日 +${value}` : `+${value}`
     }
+    // 组合展示汇总绿字奖励用：保留原始 quota，避免解析已格式化的金额字符串
+    result.awardQuotaValue = r.awardText == null ? (r.awardQuota ?? null) : null
   } else {
     result.status = 'fail'
     result.statusText = STATUS_TEXT.fail
@@ -450,6 +453,75 @@ export function finalizeCheckinResult(account, r, { beforeInfo = null, afterInfo
 }
 
 /**
+ * 一个账号的签到及每日抽奖，按执行顺序返回独立活动结果。
+ * 展示时用 combineCheckinResults 归并到一条站点记录的批注里。
+ * 签到先完成余额复核；抽奖仅更新余额，不写入签到日期或确认状态。
+ * initialCheckin 用于绑定时已由适配器完成签到的账号，避免重复提交。
+ */
+export async function checkinAccountResults(account, { initialCheckin = null, info = null } = {}) {
+  const skipped = matchSkipHost(account.name, getConfig().skip?.hosts)
+  const row = initialCheckin && !skipped
+    ? finalizeCheckinResult(account, initialCheckin, { afterInfo: info })
+    : await checkinAccount(account)
+  const rows = [row]
+  const adapter = getAdapter(account.type)
+  if (skipped || matchSkipHost(account.name, getConfig().skip?.hosts) || adapter.type !== 'newapi') return rows
+
+  let lottery
+  try {
+    lottery = await claimDailyLottery(account, adapter.buildHeaders(account))
+  } catch {
+    // 抽奖属于独立活动，不能覆盖前面已完成的签到结果。
+    lottery = { ok: false, msg: '无法处理抽奖结果，请到站点查看' }
+  }
+  if (!lottery) return rows
+  const status = lottery.uncertain ? 'unknown' : (lottery.ok ? (lottery.already ? 'already' : 'ok') : 'fail')
+  const statusTexts = { ok: '抽奖成功', already: '今日已抽', unknown: '抽奖未确认', fail: '抽奖失败' }
+  const balance = lottery.balanceQuota == null ? '-' : (quotaToUsd(lottery.balanceQuota) || '-')
+  const award = lottery.awardQuota == null || lottery.already
+    ? ''
+    : `${lottery.awardQuota < 0 ? '-' : '+'}${quotaToUsd(Math.abs(lottery.awardQuota))}`
+  rows.push({
+    name: `${accountLabel(account)} · 每日抽奖`,
+    status,
+    statusText: statusTexts[status],
+    award,
+    awardQuotaValue: award ? lottery.awardQuota : null,
+    balance,
+    msg: lottery.msg || ''
+  })
+  if (balance !== '-') account.lastBalance = balance
+  return rows
+}
+
+/**
+ * 一站一行：独立活动的结果与金额分列在批注中。
+ * 不修改原活动结果，也不把抽奖金额并进签到奖励；余额显示最后一次已知值。
+ */
+export function combineCheckinResults(rows) {
+  const [checkin, ...activities] = rows
+  if (!checkin || !activities.length) return checkin
+  const describe = (label, result) => `${label}：${result.statusText}`
+    + (result.award ? `，${result.award}` : '')
+    + (result.msg && result.msg !== result.statusText ? `；${result.msg}` : '')
+  const balance = [...activities].reverse().find(result => result.balance && result.balance !== '-')?.balance
+  const combined = {
+    ...checkin,
+    balance: balance || checkin.balance,
+    msg: [describe('签到', checkin), ...activities.map(result => describe('每日抽奖', result))].join('\n')
+  }
+  // 绿字奖励合并本轮签到与抽奖所得（批注仍分列明细）；「今日」前缀沿用签到状态
+  const quotaGains = [checkin.awardQuotaValue, ...activities.map(result => result.awardQuotaValue)]
+    .filter(value => typeof value === 'number' && Number.isFinite(value))
+  if (quotaGains.length) {
+    const total = quotaGains.reduce((sum, value) => sum + value, 0)
+    const value = quotaToUsd(Math.abs(total)) ?? Math.abs(total)
+    combined.award = `${checkin.status === 'already' ? '今日 ' : ''}${total < 0 ? '-' : '+'}${value}`
+  }
+  return combined
+}
+
+/**
  * 对一个用户条目的全部（或指定序号）账号执行签到
  * @param {object} entry 存储条目
  * @param {object} opts { index: 1起的序号(可选), delayRange: [min,max]秒(可选，账号间随机间隔),
@@ -463,7 +535,7 @@ export async function checkinEntry(entry, { index = null, delayRange = null, aut
     if (i > 0 && delayRange) {
       await sleep(randInt(delayRange[0], delayRange[1]) * 1000)
     }
-    results.push(await checkinAccount(accounts[i]))
+    results.push(combineCheckinResults(await checkinAccountResults(accounts[i])))
   }
   safePersist()
   return results
