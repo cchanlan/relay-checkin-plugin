@@ -412,6 +412,8 @@ export function finalizeCheckinResult(account, r, { beforeInfo = null, afterInfo
     if (value != null) {
       result.award = r.already ? `今日 +${value}` : `+${value}`
     }
+    // 组合展示汇总绿字奖励用：保留原始 quota，避免解析已格式化的金额字符串
+    result.awardQuotaValue = r.awardText == null ? (r.awardQuota ?? null) : null
   } else {
     result.status = 'fail'
     result.statusText = STATUS_TEXT.fail
@@ -467,6 +469,7 @@ export async function checkinAccountResults(account, { initialCheckin = null, in
     status,
     statusText: statusTexts[status],
     award,
+    awardQuotaValue: award ? lottery.awardQuota : null,
     balance,
     msg: lottery.msg || ''
   })
@@ -485,11 +488,20 @@ export function combineCheckinResults(rows) {
     + (result.award ? `，${result.award}` : '')
     + (result.msg && result.msg !== result.statusText ? `；${result.msg}` : '')
   const balance = [...activities].reverse().find(result => result.balance && result.balance !== '-')?.balance
-  return {
+  const combined = {
     ...checkin,
     balance: balance || checkin.balance,
     msg: [describe('签到', checkin), ...activities.map(result => describe('每日抽奖', result))].join('\n')
   }
+  // 绿字奖励合并本轮签到与抽奖所得（批注仍分列明细）；「今日」前缀沿用签到状态
+  const quotaGains = [checkin.awardQuotaValue, ...activities.map(result => result.awardQuotaValue)]
+    .filter(value => typeof value === 'number' && Number.isFinite(value))
+  if (quotaGains.length) {
+    const total = quotaGains.reduce((sum, value) => sum + value, 0)
+    const value = quotaToUsd(Math.abs(total)) ?? Math.abs(total)
+    combined.award = `${checkin.status === 'already' ? '今日 ' : ''}${total < 0 ? '-' : '+'}${value}`
+  }
+  return combined
 }
 
 /**
