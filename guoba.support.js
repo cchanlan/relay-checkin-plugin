@@ -238,9 +238,9 @@ export function supportGuoba() {
     pluginInfo: {
       name: 'relay-checkin-plugin',
       title: '中转站签到',
-      author: '@Cat-bl',
-      authorLink: 'https://github.com/Cat-bl',
-      link: 'https://github.com/Cat-bl/relay-checkin-plugin',
+      author: '@cchanlan',
+      authorLink: 'https://github.com/cchanlan',
+      link: 'https://github.com/cchanlan/relay-checkin-plugin',
       isV3: true,
       isV2: false,
       description: 'new-api / Veloera / AnyRouter / AgentRouter / 薄荷 中转站自动签到与余额查询',
