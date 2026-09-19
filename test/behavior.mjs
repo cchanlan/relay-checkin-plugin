@@ -1348,6 +1348,88 @@ try {
   assert.match(fs.readFileSync(path.join(ROOT, 'ng', 'render.js'), 'utf8'), /type:\s*'png'/, 'NG 模板截图应使用无损 PNG')
   console.log('模板渲染 OK')
 
+  // ---- 9. NewAPI 原生 PoW：站点要求 PoW 挑战时自动取题、计算 nonce 并携带参数重发 ----
+  {
+    const cryptoMod = await import('node:crypto')
+    const powAdapter = (await import('../models/adapters/newapi.js')).default
+    // 与站点 worker 相同的判定：SHA-256(prefix+nonce) 前 difficulty 个 bit 全 0
+    const powMeets = (digest, difficulty) => {
+      if (difficulty <= 0) return true
+      const full = Math.floor(difficulty / 8)
+      const rem = difficulty % 8
+      for (let i = 0; i < full; i++) if (digest[i] !== 0) return false
+      if (rem > 0 && full < digest.length) return (digest[full] & (255 << (8 - rem))) === 0
+      return true
+    }
+    const solveExpected = (prefix, difficulty) => {
+      for (let s = 0; ; s++) {
+        const candidate = s.toString(16).padStart(8, '0')
+        if (powMeets(cryptoMod.createHash('sha256').update(prefix + candidate, 'utf8').digest(), difficulty)) return candidate
+      }
+    }
+
+    // 9.1 适配器级：先拒绝 → 取题 → 解算 → 带 pow_challenge/pow_nonce 精确重发 → 成功
+    const prefixA = 'pow-prefix-a'
+    const nonceA = solveExpected(prefixA, 8)
+    let noPowPosts = 0
+    let powPosts = 0
+    let challengeGets = 0
+    routes = {
+      'POST https://newapi.test/api/user/checkin': () => {
+        noPowPosts++
+        return { status: 200, body: { success: false, message: 'PoW challenge and nonce are required' } }
+      },
+      'GET https://newapi.test/api/user/pow/challenge?action=checkin': () => {
+        challengeGets++
+        return { status: 200, body: { success: true, data: { challenge_id: 'powc-a', prefix: prefixA, difficulty: 8 } } }
+      },
+      [`POST https://newapi.test/api/user/checkin?pow_challenge=powc-a&pow_nonce=${nonceA}`]: () => {
+        powPosts++
+        return { status: 200, body: { success: true, message: '签到成功', data: { quota_awarded: 12500000 } } }
+      }
+    }
+    const powOk = await powAdapter.checkin({ name: 'newapi.test', baseUrl: 'https://newapi.test', type: 'newapi', token: 't', siteUserId: 1 })
+    assert.equal(powOk.ok, true, '解出 PoW 后重发应签到成功')
+    assert.equal(powOk.awardQuota, 12500000)
+    assert.equal(noPowPosts, 1, '未带 PoW 的首次 POST 只发一次')
+    assert.equal(challengeGets, 1)
+    assert.equal(powPosts, 1, '应携带 pow_challenge/pow_nonce 精确重发一次')
+
+    // 9.2 取题失败：给出明确原因，不再发第二次 POST
+    routes = {
+      'POST https://newapi.test/api/user/checkin': { status: 200, body: { success: false, message: 'PoW challenge and nonce are required' } },
+      'GET https://newapi.test/api/user/pow/challenge?action=checkin': { status: 500, body: { success: false, message: 'boom' } }
+    }
+    const powFail = await powAdapter.checkin({ name: 'newapi.test', baseUrl: 'https://newapi.test', type: 'newapi', token: 't', siteUserId: 1 })
+    assert.equal(powFail.ok, false)
+    assert.match(String(powFail.msg), /取题|挑战题/, '失败原因应说明没拿到挑战题')
+
+    // 9.3 完整链路：状态未签 → POST 要求 PoW → 解算重发成功 → 报告成功与奖励
+    const nowP = new Date()
+    const monthP = `${nowP.getFullYear()}-${String(nowP.getMonth() + 1).padStart(2, '0')}`
+    const prefixC = 'pow-prefix-c'
+    const nonceC = solveExpected(prefixC, 8)
+    let powPostsC = 0
+    let selfCallsC = 0
+    routes = {
+      [`GET https://newapi.test/api/user/checkin?month=${monthP}`]: { status: 200, body: { success: true, data: { stats: { checked_in_today: false, records: [] } } } },
+      'POST https://newapi.test/api/user/checkin': { status: 200, body: { success: false, message: 'PoW challenge and nonce are required' } },
+      'GET https://newapi.test/api/user/pow/challenge?action=checkin': { status: 200, body: { success: true, data: { challenge_id: 'powc-c', prefix: prefixC, difficulty: 8 } } },
+      [`POST https://newapi.test/api/user/checkin?pow_challenge=powc-c&pow_nonce=${nonceC}`]: () => {
+        powPostsC++
+        return { status: 200, body: { success: true, message: '签到成功', data: { quota_awarded: 12500000 } } }
+      },
+      'GET https://newapi.test/api/user/self': () => {
+        selfCallsC++
+        return { status: 200, body: { success: true, data: { id: 1, quota: selfCallsC === 1 ? 12500000 : 25000000, used_quota: 0 } } }
+      }
+    }
+    const powAccount = await checkinAccount({ name: 'newapi.test', baseUrl: 'https://newapi.test', type: 'newapi', token: 'T', siteUserId: 1 })
+    assert.equal(powAccount.status, 'ok', '完整链路 PoW 签到应成功')
+    assert.match(String(powAccount.award), /\+\$25\.00/, '奖励应为余额差额 $25')
+    assert.equal(powPostsC, 1)
+  }
+
   console.log('\n全部行为测试通过 ✓')
 } finally {
   global.fetch = realFetch
