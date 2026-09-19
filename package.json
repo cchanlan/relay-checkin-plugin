@@ -2,7 +2,8 @@
   "name": "relay-checkin-plugin",
   "version": "1.1.0",
   "description": "中转站（new-api / Veloera / AnyRouter / AgentRouter / Sub2API）自动签到插件，支持 TRSS-Yunzai 与 Yunzai NG",
-  "author": "",
+  "author": "cchanlan",
+  "license": "MIT",
   "homepage": "https://github.com/cchanlan/relay-checkin-plugin",
   "type": "module",
   "yunzai": {

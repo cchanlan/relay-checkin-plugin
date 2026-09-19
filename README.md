@@ -196,3 +196,9 @@ skip:
 
 仅供学习交流，账号风险自负。
 
+## 开源协议
+
+[MIT](LICENSE) © 2026 cchanlan
+
+本仓库是 [Cat-bl/relay-checkin-plugin](https://github.com/Cat-bl/relay-checkin-plugin)
+的 Fork，原插件版权归原作者所有，在此一并致谢。
