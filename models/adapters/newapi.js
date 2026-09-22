@@ -48,9 +48,68 @@ function needsGameIntegrity(json) {
 }
 
 /**
+ * new-api 原生 PoW：部分站点的签到 POST 会被拒绝并提示
+ * 「PoW challenge and nonce are required」。需要先向
+ * GET /api/user/pow/challenge?action=checkin 取挑战，本地算出 nonce，
+ * 再携带 pow_challenge/pow_nonce 查询参数重发签到。
+ */
+function needsNativePow(json) {
+  const msg = json?.message || json?.msg || json?.error?.message || ''
+  return /pow[ _-]*challenge[ _-]+and[ _-]+nonce|challenge and nonce are required/i.test(String(msg))
+}
+
+/**
+ * 站点 worker 的达标判定：SHA-256 摘要的前 difficulty 个 bit 全为 0。
+ * 按字节检查：前 floor(difficulty/8) 个字节必须全 0，余数位在下一字节
+ * 用高位掩码检查；difficulty 非正数恒真。
+ */
+function powHashMeetsDifficulty(digest, difficulty) {
+  if (difficulty <= 0) return true
+  const full = Math.floor(difficulty / 8)
+  const rem = difficulty % 8
+  for (let i = 0; i < full && i < digest.length; i++) {
+    if (digest[i] !== 0) return false
+  }
+  if (rem > 0 && full < digest.length && (digest[full] & (255 << (8 - rem))) !== 0) return false
+  return true
+}
+
+/**
+ * 与站点前端 worker 相同的 nonce 形态：十进制计数器转 16 进制并左补零到 8 位。
+ * 难度 18 约需 2^18 次哈希，Node 本地计算秒级完成；超时兜底避免卡住整个签到流程。
+ */
+function solveNativePowNonce(prefix, difficulty, deadlineMs = 20000) {
+  const started = Date.now()
+  for (let s = 0; s <= 0xffffffff; s++) {
+    const nonce = s.toString(16).padStart(8, '0')
+    const digest = createHash('sha256').update(prefix + nonce, 'utf8').digest()
+    if (powHashMeetsDifficulty(digest, difficulty)) return nonce
+    if ((s & 0xffff) === 0xffff && Date.now() - started > deadlineMs) {
+      throw new Error(`PoW 计算超时（${Math.round(deadlineMs / 1000)} 秒，难度 ${difficulty}）`)
+    }
+  }
+  throw new Error('PoW 挑战无解（nonce 空间已用尽）')
+}
+
+/**
+ * 取原生 PoW 挑战：GET /api/user/pow/challenge?action=checkin。
+ * 响应形如 {success:true, data:{challenge_id, prefix, difficulty}}；缺字段视为失败抛出。
+ */
+async function fetchNativePowChallenge(account, headers) {
+  const res = await request(`${account.baseUrl}/api/user/pow/challenge?action=checkin`, { headers })
+  const data = res.json?.data
+  if (!res.json?.success || !data?.challenge_id || typeof data?.difficulty !== 'number') {
+    const msg = res.json?.message || res.json?.msg || res.json?.error?.message || `HTTP ${res.status}`
+    throw new Error(msg)
+  }
+  return data
+}
+
+/**
  * new-api（QuantumNous/new-api 及多数同源魔改）
  * 鉴权：Authorization: Bearer <系统访问令牌>
- * 签到：POST /api/user/checkin（站点开启 Turnstile 时无法纯 API 签到）
+ * 签到：POST /api/user/checkin（站点开启 Turnstile 时无法纯 API 签到；
+ * 站点开启原生 PoW 时由 checkin 自动取题解算后携带参数重发）
  */
 export default {
   type: 'newapi',
@@ -132,6 +191,23 @@ export default {
           ...gameIntegrityHeaders(account)
         }
       })
+    }
+    if (needsNativePow(res.json)) {
+      // 原生 PoW：取挑战 → 本地算 nonce → 携带 pow_challenge/pow_nonce 重发。
+      // 第二次 POST 是携带已解凭据的新请求，不是对同一请求的盲目重试。
+      logger.info(`[relay-checkin-plugin] ${account.name} 要求 PoW 挑战，取题并计算 nonce 后重发`)
+      try {
+        const challenge = await fetchNativePowChallenge(account, this.buildHeaders(account))
+        const nonce = solveNativePowNonce(String(challenge.prefix ?? ''), Number(challenge.difficulty))
+        const params = new URLSearchParams({ pow_challenge: String(challenge.challenge_id), pow_nonce: nonce })
+        res = await request(`${url}?${params.toString()}`, {
+          method: 'POST',
+          headers: this.buildHeaders(account)
+        })
+      } catch (err) {
+        logger.warn(`[relay-checkin-plugin] ${account.name} PoW 挑战未完成: ${err?.message || err}`)
+        return { ok: false, already: false, msg: `站点要求 PoW 挑战，但嘟嘟没拿到挑战题：${err?.message || err}` }
+      }
     }
     return parseCheckinResult(res.status, res.json, res)
   }
