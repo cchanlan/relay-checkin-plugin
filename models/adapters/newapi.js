@@ -206,7 +206,7 @@ export default {
         })
       } catch (err) {
         logger.warn(`[relay-checkin-plugin] ${account.name} PoW 挑战未完成: ${err?.message || err}`)
-        return { ok: false, already: false, msg: `站点要求 PoW 挑战，但嘟嘟没拿到挑战题：${err?.message || err}` }
+        return { ok: false, already: false, msg: `站点要求 PoW 挑战，没拿到挑战题：${err?.message || err}` }
       }
     }
     return parseCheckinResult(res.status, res.json, res)
