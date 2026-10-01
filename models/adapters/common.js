@@ -147,16 +147,27 @@ function logNonJsonResponse(method, targetUrl, response) {
 /**
  * 发起 JSON 请求（带超时与重试；命中代理配置的 https 站点走代理）
  * @param {object} opts { method, headers, body: JSON 对象或字符串,
- *                        timeoutMs: 覆盖配置超时, maxRetry: 覆盖配置重试次数 }
+ *                        timeoutMs: 覆盖配置超时, maxRetry: 覆盖配置重试次数,
+ *                        retryStatuses: 命中这些状态码时重试（明确否定才重发）,
+ *                        retryDelayMs: 重试前等待毫秒数 }
  * @returns {Promise<{status: number, json: object|null, setCookies: string[]}>}
  */
-export async function request(url, { method = 'GET', headers = {}, body = null, timeoutMs = null, maxRetry = null } = {}) {
+export async function request(url, { method = 'GET', headers = {}, body = null, timeoutMs = null, maxRetry = null, retryStatuses = null, retryDelayMs = 0 } = {}) {
   const cfg = getConfig()
   const tMs = timeoutMs ?? (cfg.request.timeout || 15) * 1000
   const normalizedMethod = String(method || 'GET').toUpperCase()
   const idempotent = ['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)
   // 签到 POST 不能自动重试：第一次可能已在服务端成功，只是响应在途中丢失。
   const retries = idempotent ? (maxRetry ?? (cfg.request.retry ?? 2)) : 0
+  // 收到「明确否定」的状态码（网关 502/503/504 等）时可以重试：此时服务端一定没有
+  // 成功，重发不存在「可能已生效」的风险。只有调用方显式传 retryStatuses 才启用，
+  // 重试次数取显式 maxRetry（非幂等请求不会因此被默认重发）。
+  const retryableStatuses = Array.isArray(retryStatuses)
+    ? retryStatuses.map(Number).filter(Number.isFinite)
+    : []
+  const statusRetries = retryableStatuses.length
+    ? Math.max(0, Number(maxRetry ?? (cfg.request.retry ?? 2)) || 0)
+    : 0
   let requestBody = body
   const fullHeaders = {
     'User-Agent': cfg.request.userAgent,
@@ -174,7 +185,26 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
   const proxyUrl = safeUrl.protocol === 'https:' ? proxyForHost(safeUrl.hostname) : null
 
   let lastErr = null
-  for (let attempt = 0; attempt <= retries; attempt++) {
+
+  // 两类重试各自计数：传输层错误只对幂等请求重试（「不知道成没成」不重发），
+  // 状态码重试只认明确否定的应答（服务端一定没成功，重发安全）。
+  let transportRetriesUsed = 0
+  let statusRetriesUsed = 0
+  const shouldRetryStatus = response => {
+    if (!statusRetries || statusRetriesUsed >= statusRetries) return false
+    if (!retryableStatuses.includes(Number(response?.status))) return false
+    statusRetriesUsed++
+    lastErr = new Error(`HTTP ${response.status}`)
+    logger.info(`[relay-checkin-plugin] ${normalizedMethod} ${requestPathname(targetUrl)} 返回 HTTP ${response.status}`
+      + `，重试 ${statusRetriesUsed}/${statusRetries}`)
+    return true
+  }
+  const sleepBeforeRetry = () => (retryDelayMs > 0
+    ? new Promise(resolve => setTimeout(resolve, retryDelayMs))
+    : null)
+  // 传输层重试（仅幂等请求）与状态码重试（显式 opt-in）共用这个循环，取两者较大值。
+  const maxAttempts = Math.max(retries, statusRetries)
+  for (let attempt = 0; attempt <= maxAttempts; attempt++) {
     if (proxyUrl) {
       try {
         const response = await proxiedRequest(targetUrl, {
@@ -185,10 +215,17 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
           proxyUrl
         })
         response.host = safeUrl.hostname
+        if (shouldRetryStatus(response)) {
+          const wait = sleepBeforeRetry()
+          if (wait) await wait
+          continue
+        }
         logNonJsonResponse(normalizedMethod, targetUrl, response)
         return response
       } catch (err) {
         lastErr = err
+        if (transportRetriesUsed >= retries) break
+        transportRetriesUsed++
         continue
       }
     }
@@ -225,12 +262,19 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
         bodyLength: text.length,
         setCookies: responseSetCookies(res.headers)
       }
+      if (shouldRetryStatus(response)) {
+        const wait = sleepBeforeRetry()
+        if (wait) await wait
+        continue
+      }
       logNonJsonResponse(normalizedMethod, targetUrl, response)
       return response
     } catch (err) {
       lastErr = timedOut
         ? new Error(`请求超时，请稍后重试`)
         : err
+      if (transportRetriesUsed >= retries) break
+      transportRetriesUsed++
     } finally {
       clearTimeout(timer)
     }

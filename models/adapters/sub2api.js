@@ -237,7 +237,11 @@ async function captchaDisabled(account) {
 async function loginByPassword(account) {
   const res = await request(apiUrl(account, '/auth/login'), {
     method: 'POST',
-    body: { email: String(account.loginEmail || '').trim(), password: String(account.password || '') }
+    body: { email: String(account.loginEmail || '').trim(), password: String(account.password || '') },
+    // 同上：登录可安全重发，只对明确否定的状态码重试。
+    retryStatuses: [502, 503, 504, 429],
+    maxRetry: 2,
+    retryDelayMs: 400
   })
   const json = res.json || {}
   const failed = 'code' in json && json.code !== 0 && json.code !== '0'
