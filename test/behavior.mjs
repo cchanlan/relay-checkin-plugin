@@ -1477,6 +1477,51 @@ try {
     }
   }
 
+  // ---- 10. 登录接口偶发 5xx：只对「明确否定」的状态码做有限重试 ----
+  {
+    const agentrouterAdapter = (await import('../models/adapters/agentrouter.js')).default
+    const LOGIN_URL = 'POST https://agentrouter.org/api/user/login?turnstile='
+    const warns = []
+    const origWarn = global.logger.warn
+    global.logger.warn = (...args) => { warns.push(args.join(' ')) }
+    try {
+      // 10.1 网关偶发 502：前两次否定、第三次成功 → 必须重试并保存新 Session
+      let calls = 0
+      routes = {
+        [LOGIN_URL]: () => {
+          calls++
+          if (calls <= 2) return { status: 502, body: null }
+          return {
+            status: 200,
+            body: { success: true, data: { id: 7, username: 'u', checked_in: true, quota: 0, used_quota: 0 } },
+            setCookies: ['session=RETRY_SESSION; Path=/; HttpOnly']
+          }
+        },
+        'GET https://agentrouter.org/api/status': {
+          status: 200,
+          body: { success: true, data: { quota_per_unit: 500000, announcements: [] } }
+        }
+      }
+      const retriedAccount = { ...EMAIL_AR }
+      const retried = await agentrouterAdapter.checkin(retriedAccount)
+      assert.equal(calls, 3, '502 应答应触发重试，总计最多 3 次')
+      assert.equal(retried.ok, true, '重试后应登录成功')
+      assert.equal(retriedAccount.token, 'RETRY_SESSION', '应保存重试成功后拿到的新 Session')
+
+      // 10.2 持续 502：重试必须封顶，如实报原因，并留可统计的 WARN
+      warns.length = 0
+      let calls2 = 0
+      routes = { [LOGIN_URL]: () => { calls2++; return { status: 502, body: null } } }
+      const failed = await agentrouterAdapter.checkin({ ...EMAIL_AR })
+      assert.equal(calls2, 3, '重试次数必须封顶，不能无限重发登录')
+      assert.equal(failed.ok, false)
+      assert.match(String(failed.msg), /HTTP 502/)
+      assert.ok(warns.some(w => /502/.test(w)), '登录最终失败应留 WARN 供统计频率')
+    } finally {
+      global.logger.warn = origWarn
+    }
+  }
+
   console.log('\n全部行为测试通过 ✓')
 } finally {
   global.fetch = realFetch

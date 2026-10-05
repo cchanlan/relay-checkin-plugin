@@ -48,7 +48,12 @@ const adapter = {
       body: {
         username: account.loginEmail,
         password: account.password
-      }
+      },
+      // 网关偶发 502/503/504（本机经 WARP 出口时更常见）。登录可以安全重发，
+      // 与「签到 POST 只发一次」的约定不冲突：签到可能已生效，登录不会。
+      retryStatuses: [502, 503, 504, 429],
+      maxRetry: 2,
+      retryDelayMs: 400
     })
 
     const json = res.json
@@ -59,7 +64,12 @@ const adapter = {
           + '纯 HTTP 与本机浏览器都过不去；换一个非数据中心出口（proxy.url）即可恢复，'
           + 'Cookie 模式同样被拦，不是替代方案')
       }
-      return { ok: false, already: false, msg: loginError(res.status, json, res) }
+      const reason = loginError(res.status, json, res)
+      if (!isAliyunWafPage(res)) {
+        logger.warn(`[relay-checkin-plugin] ${account.baseUrl} 邮箱登录未成功`
+          + `（HTTP ${res.status}）：${reason}`)
+      }
+      return { ok: false, already: false, msg: reason }
     }
 
     const data = json.data
