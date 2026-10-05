@@ -202,8 +202,10 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
   const sleepBeforeRetry = () => (retryDelayMs > 0
     ? new Promise(resolve => setTimeout(resolve, retryDelayMs))
     : null)
-  // 传输层重试（仅幂等请求）与状态码重试（显式 opt-in）共用这个循环，取两者较大值。
-  const maxAttempts = Math.max(retries, statusRetries)
+  // 传输层重试（仅幂等请求）与状态码重试（显式 opt-in）共用这个循环。两类预算
+  // 各自计数、互不挤占，所以上界必须是「两者之和」：取较大值会让先耗尽的那类
+  // 提前结束循环，另一类没花完的预算被白白丢掉。
+  const maxAttempts = retries + statusRetries
   for (let attempt = 0; attempt <= maxAttempts; attempt++) {
     if (proxyUrl) {
       try {

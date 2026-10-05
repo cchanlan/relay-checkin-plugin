@@ -70,7 +70,7 @@ export function pickValidationFallback(r, { validation, browserEnabled, hasCheck
  * POST /api/user/checkin/captcha 取 captcha_id + 图片 → ddddocr 识别 → 带
  * captcha_id/captcha_answer 重新提交签到，答错自动换码重试。
  */
-async function captchaFallback(account, adapter, checkinPath = adapter.checkinPath, maxAttempts = 15) {
+async function captchaFallback(account, adapter, checkinPath = adapter.checkinPath, maxAttempts = 15, { quiet = false } = {}) {
   const headers = adapter.buildHeaders(account)
   const captchaUrl = new URL('/api/user/checkin/captcha', `${account.baseUrl}/`).toString()
   const checkinUrl = new URL(checkinPath, `${account.baseUrl}/`).toString()
@@ -83,8 +83,16 @@ async function captchaFallback(account, adapter, checkinPath = adapter.checkinPa
     if (!cap.json?.success || !captchaId || !image) {
       const msg = cap.json?.message || `HTTP ${cap.status}`
       const hint = /请打开网站/.test(String(msg)) ? '（该站签到接口只认网页会话，请改用 #中转添加cookie 地址 session值 用户ID 绑定）' : ''
-      logger.warn(`[relay-checkin-plugin] ${account.name} 获取验证码失败：${msg}`)
-      return { ok: false, already: false, validation: 'captcha', msg: `获取验证码失败：${msg}${hint}` }
+      if (!quiet) logger.warn(`[relay-checkin-plugin] ${account.name} 获取验证码失败：${msg}`)
+      // 404 说明这个站根本没有图形验证码接口。调用方（「人机验证 token」那条路）要据此
+      // 决定是采纳这条结论，还是保留自己更准确的「取不到 site key」提示。
+      return {
+        ok: false,
+        already: false,
+        validation: 'captcha',
+        noCaptchaEndpoint: Number(cap.status) === 404,
+        msg: `获取验证码失败：${msg}${hint}`
+      }
     }
 
     let answer = ''
@@ -160,7 +168,14 @@ async function turnstileFallback(account, adapter, checkinPath = adapter.checkin
     }
   }
   if (!siteKey) {
-    return { ok: false, already: false, msg: '站点要求人机验证但无法获取 site key，无法自动签到' }
+    // noSiteKey 交给调用方：魔改站可能把提示写成「人机验证 token」，实际只实现了
+    // 图形验证码接口，此时不该直接判死，图形验证码那条路还有机会。
+    return {
+      ok: false,
+      already: false,
+      noSiteKey: true,
+      msg: '站点要求人机验证但无法获取 site key，无法自动签到'
+    }
   }
 
   const res = await turnstileCheckin(account, {
@@ -321,6 +336,19 @@ export async function checkinAccount(account) {
             // 又没有别的处理，直接落地成「请求被站点 WAF/人机验证拦截」的死路。
             logger.info(`[relay-checkin-plugin] ${account.name} 需人机验证，尝试浏览器方案`)
             r = await turnstileFallback(account, adapter, browserCheckinPath)
+
+            // 「人机验证 token」是 new-api 对 Turnstile 那类凭据的统称，但魔改站可能
+            // 只实现了图形验证码接口。取不到 site key 时别直接判死，回退试一次图形验证码；
+            // 站点确实没有该接口（404）就保留上面那句更准确的提示。
+            if (r?.noSiteKey) {
+              logger.info(`[relay-checkin-plugin] ${account.name} 取不到 Turnstile site key，改试图形验证码`)
+              try {
+                const cap = await captchaFallback(account, adapter, browserCheckinPath, 15, { quiet: true })
+                if (!cap?.noCaptchaEndpoint) r = cap
+              } catch (err) {
+                logger.warn(`[relay-checkin-plugin] ${account.name} 图形验证码兜底异常：${err?.message || err}`)
+              }
+            }
           }
         }
       }

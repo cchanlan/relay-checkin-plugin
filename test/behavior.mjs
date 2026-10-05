@@ -53,7 +53,8 @@ try {
   cfgNow.security.allowedPrivateHosts = [
     'agentrouter.org', 'newapi.test', 'n.com', 'v.com', 'x.com', 't.com', 'anyrouter.top', 's2.test', 's2v2.test',
     'nocap.test', 'nocap2.test', 'hascap.test', 'badcfg.test', 'flaky.test',
-    'tbe.test', 'tbedone.test', 'tbenowait.test'
+    'tbe.test', 'tbedone.test', 'tbenowait.test',
+    'modded.test', 'nocapend.test', 'budget.test'
   ]
   // 同理，测试也不能受运行环境（data/config.yaml 或 config_default 模板）里的代理配置影响：
   // 命中 proxy.hosts 的站点会走 node:https + proxy agent，完全绕过上面的 mock fetch
@@ -1521,6 +1522,108 @@ try {
       global.logger.warn = origWarn
     }
   }
+
+  // ---- 12. 魔改站：提示是「人机验证 token」，但只提供图形验证码接口 ----
+  {
+    const month12 = new Date().toISOString().slice(0, 7)
+    let captchaHits12 = 0
+    const savedEnable12 = cfgNow.browser.enable
+    // 必须开浏览器开关：关着的话 pickValidationFallback 对 turnstile 一律返回 null，
+    // 根本走不到 turnstileFallback，这条兜底也就测不到了。
+    cfgNow.browser.enable = true
+    try {
+      routes = {
+        [`GET https://modded.test/api/user/checkin?month=${month12}`]: {
+          status: 200,
+          body: { success: true, data: { stats: { checked_in_today: false, records: [] } } }
+        },
+        'GET https://modded.test/api/user/self': {
+          status: 200,
+          body: { success: true, data: { id: 1, quota: 500000, used_quota: 0 } }
+        },
+        'POST https://modded.test/api/user/checkin': {
+          status: 200,
+          body: { success: false, message: '人机验证 token 为空' }
+        },
+        // 没有 turnstile_site_key：这类魔改站只有图形验证码，Turnstile 那条路必然取不到 key
+        'GET https://modded.test/api/status': {
+          status: 200,
+          body: { success: true, data: { checkin_enabled: true } }
+        },
+        'POST https://modded.test/api/user/checkin/captcha': () => {
+          captchaHits12++
+          return { status: 200, body: { success: false, message: '请打开网站进行签到' } }
+        }
+      }
+      const r12 = await checkinAccount({ name: 'modded.test', baseUrl: 'https://modded.test', type: 'newapi', token: 'T', siteUserId: 1 })
+      assert.equal(captchaHits12, 1, '取不到 Turnstile site key 时必须回退试一次图形验证码')
+      assert.equal(r12.status, 'fail')
+      assert.match(String(r12.msg), /获取验证码失败/, '应采纳图形验证码通道给出的结论')
+      assert.match(String(r12.msg), /请打开网站/, '应保留站点原话')
+    } finally {
+      cfgNow.browser.enable = savedEnable12
+    }
+  }
+
+  // ---- 13. 站点确实没有图形验证码接口（404）时，保留「取不到 site key」那句更准确的提示 ----
+  {
+    const month13 = new Date().toISOString().slice(0, 7)
+    const warns13 = []
+    const origWarn13 = global.logger.warn
+    global.logger.warn = (...args) => { warns13.push(args.join(' ')) }
+    const savedEnable13 = cfgNow.browser.enable
+    cfgNow.browser.enable = true
+    try {
+      routes = {
+        [`GET https://nocapend.test/api/user/checkin?month=${month13}`]: {
+          status: 200,
+          body: { success: true, data: { stats: { checked_in_today: false, records: [] } } }
+        },
+        'GET https://nocapend.test/api/user/self': {
+          status: 200,
+          body: { success: true, data: { id: 1, quota: 500000, used_quota: 0 } }
+        },
+        'POST https://nocapend.test/api/user/checkin': {
+          status: 200,
+          body: { success: false, message: '人机验证 token 为空' }
+        },
+        'GET https://nocapend.test/api/status': {
+          status: 200,
+          body: { success: true, data: { checkin_enabled: true } }
+        },
+        'POST https://nocapend.test/api/user/checkin/captcha': () => ({ status: 404, body: null })
+      }
+      const r13 = await checkinAccount({ name: 'nocapend.test', baseUrl: 'https://nocapend.test', type: 'newapi', token: 'T', siteUserId: 1 })
+      assert.equal(r13.status, 'fail')
+      assert.match(String(r13.msg), /无法获取 site key/, '没有图形验证码接口时应保留 site key 那句提示')
+      assert.doesNotMatch(String(r13.msg), /获取验证码失败/, '不该退化成图形验证码的失败文案')
+      assert.ok(!warns13.some(w => /获取验证码失败/.test(w)), '兜底探测 404 时不该刷「获取验证码失败」WARN')
+    } finally {
+      global.logger.warn = origWarn13
+      cfgNow.browser.enable = savedEnable13
+    }
+  }
+
+  // ---- 14. 两类重试预算独立：传输层异常不该吃掉状态码重试的名额 ----
+  {
+    let attempt14 = 0
+    routes = {
+      'GET https://budget.test/api/x': () => {
+        attempt14++
+        if (attempt14 <= 2) throw new Error('ECONNRESET')
+        if (attempt14 === 3) return { status: 502, body: null }
+        return { status: 200, body: { success: true } }
+      }
+    }
+    const res14 = await request('https://budget.test/api/x', {
+      method: 'GET',
+      retryStatuses: [502],
+      maxRetry: 2
+    })
+    assert.equal(res14.status, 200, '传输层重试与状态码重试的预算必须独立，异常不该吃掉 502 的名额')
+    assert.equal(attempt14, 4, '应共请求 4 次：首次 + 2 次传输层重试 + 1 次状态码重试')
+  }
+
 
   console.log('\n全部行为测试通过 ✓')
 } finally {
