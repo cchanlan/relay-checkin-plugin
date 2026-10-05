@@ -1430,6 +1430,53 @@ try {
     assert.equal(powPostsC, 1)
   }
 
+  // ---- 11. 「人机验证 token」是 Turnstile/hCaptcha 那类 token，不是图形验证码 ----
+  {
+    const { classifyValidation } = await import('../models/adapters/common.js')
+    // new-api 对这类提示的原文就是「人机验证 token 为空」
+    assert.equal(classifyValidation({ message: '人机验证 token 为空' }), 'turnstile',
+      '人机验证 token 应走浏览器过码，而不是图形验证码')
+    assert.equal(classifyValidation({ message: '人机验证失败' }), 'captcha',
+      '含糊的「人机验证」仍按图形验证码处理，避免误伤既有站点')
+
+    // 集成：签到被要求人机验证 token 时，不得去取图形验证码（该站没有 /api/user/checkin/captcha）
+    const month11 = new Date().toISOString().slice(0, 7)
+    let captchaHits = 0
+    const savedEnable = cfgNow.browser.enable
+    cfgNow.browser.enable = false
+    try {
+      routes = {
+        [`GET https://newapi.test/api/user/checkin?month=${month11}`]: {
+          status: 200,
+          body: { success: true, data: { stats: { checked_in_today: false, records: [] } } }
+        },
+        'GET https://newapi.test/api/user/self': {
+          status: 200,
+          body: { success: true, data: { id: 1, quota: 500000, used_quota: 0 } }
+        },
+        'POST https://newapi.test/api/user/checkin': {
+          status: 200,
+          body: { success: false, message: '人机验证 token 为空' }
+        },
+        'GET https://newapi.test/api/status': {
+          status: 200,
+          body: { success: true, data: { turnstile_site_key: '0xTESTKEY', checkin_turnstile_check: true } }
+        },
+        'POST https://newapi.test/api/user/checkin/captcha': () => {
+          captchaHits++
+          return { status: 404, body: null }
+        }
+      }
+      const r11 = await checkinAccount({ name: 'newapi.test', baseUrl: 'https://newapi.test', type: 'newapi', token: 'T', siteUserId: 1 })
+      assert.equal(captchaHits, 0, '不得再请求 /api/user/checkin/captcha（本站没有图形验证码接口）')
+      assert.equal(r11.status, 'fail')
+      assert.match(String(r11.msg), /人机验证/, '应保留站点原话，而不是「获取验证码失败」')
+      assert.doesNotMatch(String(r11.msg), /获取验证码失败/, '不得落成图形验证码分支')
+    } finally {
+      cfgNow.browser.enable = savedEnable
+    }
+  }
+
   console.log('\n全部行为测试通过 ✓')
 } finally {
   global.fetch = realFetch

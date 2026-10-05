@@ -328,6 +328,10 @@ export function classifyValidation(json, meta = {}) {
     return 'pow'
   }
   if (/turnstile/i.test(text)) return 'turnstile'
+  // new-api 把签到所需的人机验证凭据统称「人机验证 token」，它要的是 Turnstile/hCaptcha
+  // 这类浏览器过码，而不是魔改站的图形验证码接口（/api/user/checkin/captcha）。
+  // 含糊的「人机验证」维持原分类，避免误伤使用图形验证码的站点。
+  if (/人机验证\s*token|human verification token/i.test(text)) return 'turnstile'
   if (/captcha|验证码|人机|请打开网站|请从网站页面发起签到/i.test(text)) return 'captcha'
   if (/访问验证|checking your browser|aliyun_waf|acw_sc|cloudflare|waf/i.test(text)) return 'waf'
   return null
