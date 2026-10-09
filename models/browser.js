@@ -2158,6 +2158,18 @@ export async function launchDetachedBrowser(puppeteer, launchOptions, { host, ex
  * 没有可用指针（macOS、缺 xdotool / PowerShell）时不自动点击，
  * 退化为「用户在弹出的窗口里手动勾选」。
  */
+/**
+ * 点击之后迟迟没有任何进展时，是否再补点一次。
+ * - `round !== clickedRound`：挑战轮次已推进，说明上一轮点击已经生效，交给正常流程；
+ * - 只有「本轮已点过、却超过 staleMs 仍无任何进展」才允许补点，并且有次数上限，
+ *   避免在组件就是不认点击时退化成机械连点（这本身也是行为特征）。
+ */
+export function shouldRetryStaleClick ({ round, clickedRound, msSinceClick, stalledRetries, staleMs = 20000, maxRetries = 2 }) {
+  if (round !== clickedRound) return false
+  if (!Number.isFinite(msSinceClick) || msSinceClick < staleMs) return false
+  return Number(stalledRetries) < maxRetries
+}
+
 async function detachedTurnstileCheckin(account, { checkinPath, headers, validationHeaders, siteKey }, timeoutSec) {
   const cfg = getConfig()
   const safeUrl = await assertSafeRequestUrl(account.baseUrl)
@@ -2290,22 +2302,38 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
     let round = 1
     let clickAttempts = 0
     let lastClick = null
+    let lastClickAt = 0
+    let stalledRetries = 0
     let firstProbe = true
     let probeMisses = 0
     let reportedProgress = false
     while (Date.now() < deadline) {
-      if (autoClick && round > clickedRound) {
+      // 点了却迟迟没有任何进展（组件没反应）时允许有限次补点：实测出现过
+      // 「指针精确落点、点击命令成功，但 token 始终为空」的情形，原逻辑只能干等到超时。
+      const gapMs = lastClickAt ? Date.now() - lastClickAt : 0
+      const staleRetry = shouldRetryStaleClick({ round, clickedRound, msSinceClick: gapMs, stalledRetries })
+      if (autoClick && (round > clickedRound || staleRetry)) {
         // 组件渲染完还要「像人一样」停一会儿再点：立刻点击本身就是行为特征。
         // 首轮还要留出 api.js 加载 + render 的时间，点在未就绪的组件上会直接判失败。
-        await waitMs((clickedRound === 0 ? 6000 : 3500) + Math.floor(Math.random() * 3000))
+        await waitMs(staleRetry
+          ? 1200 + Math.floor(Math.random() * 1500)
+          : (clickedRound === 0 ? 6000 : 3500) + Math.floor(Math.random() * 3000))
         const clicked = await nativeClick(pointerDisplay, boxX, boxY, { windowId: windowGeom?.windowId })
         clickAttempts++
+        lastClickAt = Date.now()
         const pointer = await nativeMouseLocation(pointerDisplay)
         lastClick = { clicked, x: boxX, y: boxY, pointer }
         const clickDetail = `目标=(${boxX}, ${boxY})｜指针=${pointer || '未知'}｜窗口=${windowGeom?.windowId || '未定位'}｜组件=${widgetBox.source}`
         if (clicked) {
-          clickedRound = round
-          logger.mark(`[relay-checkin-plugin] 已执行系统指针点击 ${host} 的验证复选框（第 ${round} 次挑战，${clickDetail}）`)
+          if (staleRetry) {
+            stalledRetries++
+            logger.info(`[relay-checkin-plugin] ${host} 点击后 ${Math.round(gapMs / 1000)} 秒无进展，`
+              + `补点第 ${stalledRetries} 次（${clickDetail}）`)
+          } else {
+            clickedRound = round
+            stalledRetries = 0
+            logger.mark(`[relay-checkin-plugin] 已执行系统指针点击 ${host} 的验证复选框（第 ${round} 次挑战，${clickDetail}）`)
+          }
         } else {
           // 计数用 clickAttempts 而不是 round：挑战轮次只在点成功后才推进，
           // 用它做「第 N 次尝试」会让连续重试全部显示成第 1 次，看着像卡住了
