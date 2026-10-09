@@ -449,7 +449,8 @@ try {
   const {
     detachedClickOrigin,
     detachedWidgetClickPoint,
-    interactiveTakeoverBlockReason
+    interactiveTakeoverBlockReason,
+    shouldRetryStaleClick
   } = await import('../models/browser.js')
 
   assert.equal(pointerDisplayFor(':99'), ':99', '自建虚拟屏优先')
@@ -597,6 +598,28 @@ try {
   const clickScript = windowsClickCommand(270, 332, '65552')
   assert.ok(clickScript.includes('[void][RelayNative]::SetCursorPos(270, 332)'), '指针必须停在目标坐标')
   assert.ok(clickScript.includes('$hwnd = [IntPtr]65552'), '传了窗口句柄就要先把窗口抬到最前')
+
+  // 点击后长期无进展：允许有限次补点（api.hcnsec.cn 那种「点了但组件没反应」）
+  assert.equal(
+    shouldRetryStaleClick({ round: 2, clickedRound: 1, msSinceClick: 60000, stalledRetries: 0 }), false,
+    '挑战轮次已推进说明上一轮点击生效，不该补点'
+  )
+  assert.equal(
+    shouldRetryStaleClick({ round: 1, clickedRound: 1, msSinceClick: 5000, stalledRetries: 0 }), false,
+    '刚点过不久，不能急着补点'
+  )
+  assert.equal(
+    shouldRetryStaleClick({ round: 1, clickedRound: 1, msSinceClick: 21000, stalledRetries: 0 }), true,
+    '超过阈值仍无进展应当补点'
+  )
+  assert.equal(
+    shouldRetryStaleClick({ round: 1, clickedRound: 1, msSinceClick: 21000, stalledRetries: 2 }), false,
+    '补点次数必须有上限，避免机械连点'
+  )
+  assert.equal(
+    shouldRetryStaleClick({ round: 1, clickedRound: 0, msSinceClick: 99999, stalledRetries: 0 }), false,
+    '本轮还没点过时由正常流程负责，不算补点'
+  )
   assert.ok(
     clickScript.indexOf('mouse_event(0x0002') < clickScript.indexOf('mouse_event(0x0004'),
     '必须先按下再抬起'
