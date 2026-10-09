@@ -106,6 +106,14 @@ async function fetchNativePowChallenge(account, headers) {
 }
 
 /**
+ * 站点偶尔会整站 5xx（CDN 抖动或源站重启）：这类应答正文为空、请求并没有真正落到
+ * 应用上，而 new-api 对同一日重复签到只会回「已签到」，所以立刻重发是安全的。
+ * 只对**明确的服务端失败**重试，次数封顶，避免站点真挂时反复打。
+ */
+const TRANSIENT_STATUSES = [502, 503, 504, 520, 521, 522, 523, 524, 525, 526]
+const TRANSIENT_RETRY = { retryStatuses: TRANSIENT_STATUSES, maxRetry: 2, retryDelayMs: 1200 }
+
+/**
  * new-api（QuantumNous/new-api 及多数同源魔改）
  * 鉴权：Authorization: Bearer <系统访问令牌>
  * 签到：POST /api/user/checkin（站点开启 Turnstile 时无法纯 API 签到；
@@ -148,6 +156,7 @@ export default {
 
   async userInfo(account) {
     const { json } = await request(`${account.baseUrl}/api/user/self`, {
+      ...TRANSIENT_RETRY,
       headers: this.buildHeaders(account)
     })
     return parseUserInfo(json)
@@ -158,6 +167,7 @@ export default {
     const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
     const today = `${month}-${String(now.getDate()).padStart(2, '0')}`
     const res = await request(`${account.baseUrl}/api/user/checkin?month=${month}`, {
+      ...TRANSIENT_RETRY,
       headers: this.buildHeaders(account)
     })
     if (res.status === 404) return { supported: false }
@@ -179,6 +189,7 @@ export default {
   async checkin(account) {
     const url = `${account.baseUrl}/api/user/checkin`
     let res = await request(url, {
+      ...TRANSIENT_RETRY,
       method: 'POST',
       headers: this.buildHeaders(account)
     })

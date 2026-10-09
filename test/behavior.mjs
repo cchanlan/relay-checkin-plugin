@@ -1625,6 +1625,54 @@ try {
   }
 
 
+  // ---- 15. 站点整站 5xx（CDN 抖动）时的签到兜底 ----
+  {
+    const newapiAdapter = (await import('../models/adapters/newapi.js')).default
+    const month12 = new Date().toISOString().slice(0, 7)
+    // 15.1 首次 502、重试后成功：必须自愈
+    let calls = 0
+    routes = {
+      [`GET https://newapi.test/api/user/checkin?month=${month12}`]: {
+        status: 200,
+        body: { success: true, data: { stats: { checked_in_today: false, records: [] } } }
+      },
+      'GET https://newapi.test/api/user/self': {
+        status: 200,
+        body: { success: true, data: { id: 1, quota: 500000, used_quota: 0 } }
+      },
+      'POST https://newapi.test/api/user/checkin': () => {
+        calls++
+        if (calls === 1) return { status: 502, body: null }
+        return { status: 200, body: { success: true, message: '签到成功', data: { quota_awarded: 12500000 } } }
+      }
+    }
+    const r12 = await checkinAccount({ name: 'newapi.test', baseUrl: 'https://newapi.test', type: 'newapi', token: 'T', siteUserId: 1 })
+    assert.equal(calls, 2, '整站 502 应重试一次签到 POST')
+    assert.equal(r12.status, 'ok', '重试后应签到成功')
+    assert.match(String(r12.award), /\+\$25\.00/)
+
+    // 15.2 持续 502：重试必须封顶，最终如实报失败
+    let calls2 = 0
+    routes = {
+      [`GET https://newapi.test/api/user/checkin?month=${month12}`]: {
+        status: 200,
+        body: { success: true, data: { stats: { checked_in_today: false, records: [] } } }
+      },
+      'GET https://newapi.test/api/user/self': {
+        status: 200,
+        body: { success: true, data: { id: 1, quota: 500000, used_quota: 0 } }
+      },
+      'POST https://newapi.test/api/user/checkin': () => {
+        calls2++
+        return { status: 502, body: null }
+      }
+    }
+    const r12b = await checkinAccount({ name: 'newapi.test', baseUrl: 'https://newapi.test', type: 'newapi', token: 'T', siteUserId: 1 })
+    assert.equal(calls2, 3, '重试次数必须封顶（1 次首发 + 2 次重试）')
+    assert.equal(r12b.status, 'fail')
+    assert.match(String(r12b.msg), /502/, '失败原因应保留站点状态码')
+  }
+
   console.log('\n全部行为测试通过 ✓')
 } finally {
   global.fetch = realFetch
