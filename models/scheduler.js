@@ -1,21 +1,27 @@
 import { getConfig } from './config.js'
-import { allEntries, getPushGroups } from './store.js'
+import { allEntries, getEntry, getPushGroups } from './store.js'
 import { checkinEntry, sleep, randInt } from './executor.js'
 import { renderResult, renderResultPages } from './render.js'
 import { withUserLock } from './lock.js'
 import { buildGroupPushPlan } from './push-plan.js'
 import { logger, pickBot } from '../host/index.js'
+import { beijingClock, shouldScheduleAccount } from './checkin-policy.js'
 
 let running = false
 
 /**
  * 定时任务入口：全量签到 + 按配置推送结果
  */
-export async function runScheduledCheckin() {
+export async function runScheduledCheckin({ siteOnly = false } = {}) {
   const cfg = getConfig()
   if (!cfg.schedule.enable) return
+  const day = beijingClock().day
+  const accountFilter = account => (!siteOnly || beijingClock().day === day)
+    && shouldScheduleAccount(account, { siteOnly })
+  // 分钟检查空转时不占锁、不抖动、不刷日志；手动签到成功后也无需再查一次。
+  if (siteOnly && !allEntries().some(en => en.autoCheckin && en.accounts.some(accountFilter))) return
   if (running) {
-    logger.warn('[relay-checkin-plugin] 上一轮定时签到尚未结束，跳过本次')
+    if (!siteOnly) logger.warn('[relay-checkin-plugin] 上一轮定时签到尚未结束，跳过本次')
     return
   }
   running = true
@@ -30,7 +36,7 @@ export async function runScheduledCheckin() {
     }
 
     // 总开关打开且至少有一个账号开着单账号定时开关的用户才参与
-    const entries = allEntries().filter(en => en.autoCheckin && en.accounts.some(acc => acc.auto !== false))
+    const entries = allEntries().filter(en => en.autoCheckin && en.accounts.some(accountFilter))
     if (!entries.length) {
       logger.info('[relay-checkin-plugin] 无需要定时签到的账号')
       return
@@ -56,14 +62,19 @@ export async function runScheduledCheckin() {
         try {
           // 用户间随机间隔，避免整批请求特征过于集中
           await sleep(randInt(delayRange[0], delayRange[1]) * 1000)
-          const r = await withUserLock(entry.userId, '定时签到', () =>
-            checkinEntry(entry, { delayRange, autoOnly: true }))
+          const r = await withUserLock(entry.userId, '定时签到', () => {
+            const liveEntry = getEntry({ user_id: entry.userId })
+            return liveEntry?.autoCheckin && getConfig().schedule.enable ? checkinEntry(liveEntry, {
+              delayRange, autoOnly: true, accountFilter,
+              onAccountDone: siteOnly ? account => { account.lastSiteAutoDay = day } : null
+            }) : []
+          })
           if (!r.ok) {
             skipped++
             logger.info(`[relay-checkin-plugin] 用户 ${entry.userId} 正在手动操作（${r.busy.label}），本轮跳过`)
             continue
           }
-          done.push({ entry, results: r.result })
+          if (r.result.length) done.push({ entry, results: r.result })
         } catch (err) {
           logger.error(`[relay-checkin-plugin] 用户 ${entry.userId} 定时签到异常: ${err?.message || err}`)
         }
@@ -72,7 +83,7 @@ export async function runScheduledCheckin() {
     await Promise.all(Array.from({ length: Math.min(concurrency, entries.length) }, worker))
     if (skipped) logger.info(`[relay-checkin-plugin] 本轮跳过 ${skipped} 个正在手动操作的用户`)
 
-    await pushResults(done, cfg)
+    if (done.length) await pushResults(done, cfg)
     logger.info('[relay-checkin-plugin] 定时签到完成')
   } catch (err) {
     logger.error('[relay-checkin-plugin] 定时签到异常:', err)

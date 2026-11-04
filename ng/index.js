@@ -14,6 +14,7 @@ import { COMMAND_RULES, CHECKIN_TASK_NAME, RelayCheckinCore, disposeBinds } from
 import { disposeConfig } from '../models/config.js'
 import { closeBrowser } from '../models/browser.js'
 import { runScheduledCheckin } from '../models/scheduler.js'
+import { SITE_CHECKIN_CRON, SITE_CHECKIN_TASK_NAME } from '../models/checkin-policy.js'
 import { configSchema } from './schema.js'
 import { wrapEvent, replyFor } from './event.js'
 import { disposeRenderer } from './render.js'
@@ -51,6 +52,10 @@ function registerCommands(ctx) {
 function registerCron(ctx) {
   let disposeTask = null
   let current = ''
+  const disposeSiteTask = ctx.cron(SITE_CHECKIN_CRON, () => runScheduledCheckin({ siteOnly: true }), {
+    name: SITE_CHECKIN_TASK_NAME,
+    overlap: 'skip'
+  })
 
   const arm = () => {
     const cron = ctx.config.get().schedule?.cron
@@ -71,6 +76,7 @@ function registerCron(ctx) {
   ctx.onDispose(() => {
     offConfig()
     disposeTask?.()
+    disposeSiteTask?.()
   })
 }
 

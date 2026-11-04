@@ -1242,6 +1242,40 @@ try {
   assert.ok(rules.bindPrefixed.test('/中转绑定 tok'), '/ 被归一化前的原文也应识别为前缀格式')
   console.log('指令正则 OK')
 
+  // ChatflowsAI 按真实域名及北京时间午间周期筛选，与系统时区无关。
+  const policy = await import('../models/checkin-policy.js')
+  const cf = { baseUrl: 'https://ai.chatflowsai.com', auto: true }
+  const normal = { baseUrl: 'https://other.test', name: 'ai.chatflowsai.com' }
+  const due = (a, at) => policy.shouldScheduleAccount(a, { siteOnly: true, now: Date.parse(at) })
+  assert.equal(policy.isChatflows(normal), false)
+  assert.equal(policy.isChatflows({ baseUrl: 'https://ai.chatflowsai.com.evil.test' }), false)
+  assert.equal(policy.isChatflows({ baseUrl: 'bad-url' }), false)
+  assert.equal(policy.shouldScheduleAccount(cf), false, '普通轮次不签 ChatflowsAI')
+  assert.equal(policy.shouldScheduleAccount(normal), true)
+  assert.equal(due(normal, '2026-11-04T12:10:00+08:00'), false)
+  assert.equal(due(cf, '2026-11-04T11:59:59+08:00'), false)
+  assert.equal(due(cf, '2026-11-04T12:09:59+08:00'), false)
+  assert.equal(due(cf, '2026-11-04T04:10:00Z'), true)
+  assert.equal(due({ ...cf, auto: false }, '2026-11-04T12:10:00+08:00'), false)
+  assert.equal(due({ ...cf, lastSiteAutoDay: '2026-11-04' }, '2026-11-04T23:59:59+08:00'), false)
+  assert.equal(due({ ...cf, lastSiteAutoDay: '2026-11-04' }, '2026-11-05T12:10:00+08:00'), true)
+  assert.equal(due(cf, '2026-11-05T00:00:00+08:00'), false)
+  assert.equal(due({ ...cf, lastCheckinConfirmed: true, lastCheckinAt: '2026-11-04T12:00:00+08:00' }, '2026-11-04T12:10:00+08:00'), false)
+  assert.equal(due({ ...cf, lastCheckinConfirmed: true, lastCheckinAt: '2026-11-04T11:59:59+08:00' }, '2026-11-04T12:10:00+08:00'), true)
+  assert.equal(due({ ...cf, lastCheckinConfirmed: false, lastCheckinAt: '2026-11-04T12:00:00+08:00' }, '2026-11-04T12:10:00+08:00'), true)
+  assert.equal(due({ ...cf, lastCheckinConfirmed: true, lastCheckinAt: 'invalid' }, '2026-11-04T12:10:00+08:00'), true)
+  const originalTZ = process.env.TZ
+  try {
+    for (const tz of ['UTC', 'America/New_York', 'Asia/Shanghai']) {
+      process.env.TZ = tz
+      assert.deepEqual(policy.beijingClock(Date.parse('2026-11-04T04:10:00Z')), { day: '2026-11-04', minutes: 730 })
+    }
+  } finally {
+    if (originalTZ === undefined) delete process.env.TZ
+    else process.env.TZ = originalTZ
+  }
+  console.log('ChatflowsAI 午后调度策略 OK')
+
   console.log('\n全部冒烟测试通过 ✓')
 } finally {
   // 还原 data 目录

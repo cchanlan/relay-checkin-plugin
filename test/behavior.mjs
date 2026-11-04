@@ -1673,6 +1673,222 @@ try {
     assert.match(String(r12b.msg), /502/, '失败原因应保留站点状态码')
   }
 
+  // ChatflowsAI 自定义接口：不走 /api/v1/checkin，登录/续期仍走标准接口。
+  {
+    cfgNow.security.allowedPrivateHosts.push('ai.chatflowsai.com')
+    const sub = (await import('../models/adapters/sub2api.js')).default
+    const base = 'https://ai.chatflowsai.com'
+    const fresh = () => ({ name: 'ai.chatflowsai.com', baseUrl: base, type: 'sub2api',
+      accessToken: 'CF_ACCESS', token: 'CF_REFRESH', tokenExpiresAt: Date.now() + 86400000 })
+    let checked = false
+    let posts = 0
+    const status = () => ({ status: 200, body: { code: 0, data: {
+      can_checkin: !checked, checked_in: checked, amount: 37.5, balance: checked ? 137.5 : 100,
+      period_key: '2026-11-04', next_reset_at: '2026-11-05T12:00:00+08:00'
+    } } })
+    const setup = () => {
+      checked = false
+      routes = {
+        [`GET ${base}/api/checkin/status`]: opts => {
+          assert.match(opts.headers.Authorization, /^Bearer CF_/)
+          return status()
+        },
+        [`POST ${base}/api/checkin`]: opts => {
+          assert.match(opts.headers.Authorization, /^Bearer CF_/)
+          posts++; checked = true
+          return { status: 200, body: { code: 0, data: { amount: 37.5, balance: 137.5 } } }
+        },
+        [`GET ${base}/api/v1/auth/me`]: { body: { code: 0, data: { id: 1, balance: 137.5 } } }
+      }
+    }
+    setup()
+    const start = networkCalls.length
+    const success = await sub.checkin(fresh())
+    assert.equal(success.ok, true)
+    assert.equal(success.awardText, '$37.50', '不能写死奖励金额')
+    assert.equal(success.balanceText, '$137.50')
+    assert.equal(posts, 1)
+    assert.equal((await sub.checkin(fresh())).already, true)
+    assert.equal(posts, 1, '已签不重复 POST')
+    assert.ok(!networkCalls.slice(start).some(k => k.includes('/api/v1/check')))
+    // 状态查询 401 后续期并重试原来的 /api 路径。
+    setup()
+    let statusCalls = 0
+    routes[`GET ${base}/api/checkin/status`] = () => ++statusCalls === 1
+      ? { status: 401, body: { code: 401, message: '请先登录' } } : status()
+    routes[`POST ${base}/api/v1/auth/refresh`] = opts => {
+      assert.equal(JSON.parse(opts.body).refresh_token, 'CF_REFRESH')
+      return { body: { code: 0, data: { access_token: 'CF_NEW', refresh_token: 'CF_ROTATED', expires_in: 86400 } } }
+    }
+    const renewed = fresh()
+    assert.equal((await sub.checkin(renewed)).ok, true)
+    assert.equal(renewed.token, 'CF_ROTATED')
+    assert.equal(renewed.accessToken, 'CF_NEW')
+    // 409 仅在状态复核已领取时算 already。
+    for (const verified of [true, false]) {
+      setup()
+      routes[`POST ${base}/api/checkin`] = () => {
+        checked = verified
+        return { status: 409, body: { code: 409, message: '本轮已签到' } }
+      }
+      const result = await sub.checkin(fresh())
+      assert.equal(result.ok, verified)
+      assert.equal(result.already, verified)
+    }
+    setup()
+    routes[`POST ${base}/api/checkin`] = () => {
+      checked = true
+      return { status: 200, body: { code: 409, message: '本轮已签到' } }
+    }
+    assert.equal((await sub.checkin(fresh())).already, true)
+    for (const bad of [
+      { status: 403, body: { code: 403, message: '禁止访问' } },
+      { status: 200, body: { code: 0, data: {} } },
+      { status: 200, body: { code: 0, data: { can_checkin: false, checked_in: false } } }
+    ]) {
+      setup()
+      routes[`GET ${base}/api/checkin/status`] = bad
+      const before = networkCalls.length
+      assert.equal((await sub.checkin(fresh())).ok, false)
+      assert.ok(!networkCalls.slice(before).some(k => k.startsWith('POST ')))
+    }
+    setup()
+    let failedPosts = 0
+    routes[`POST ${base}/api/checkin`] = () => {
+      failedPosts++
+      return { status: 503, body: { code: 503, message: '暂不可用' } }
+    }
+    assert.equal((await sub.checkin(fresh())).ok, false)
+    assert.equal(failedPosts, 1, '不重发领取 POST')
+    setup()
+    routes[`POST ${base}/api/checkin`] = { body: { code: 0, data: {} } }
+    assert.equal((await sub.checkin(fresh())).ok, false, '畸形成功响应不能冒充成功')
+
+    setup()
+    routes[`GET ${base}/api/checkin/status`] = { status: 401, body: { code: 401, message: '请先登录' } }
+    routes[`POST ${base}/api/v1/auth/refresh`] = { status: 401, body: { code: 401, message: 'expired' } }
+    const noLogin = fresh()
+    noLogin.authMode = 'refresh'
+    assert.equal((await sub.checkin(noLogin)).ok, false, '续期失败不能误报签到成功')
+
+    // 完整调度链路：隔离数据、mock 网络；不开浏览器、不发群消息。
+    const store = await import('../models/store.js')
+    const { tryAcquire } = await import('../models/lock.js')
+    const { runScheduledCheckin } = await import('../models/scheduler.js')
+    const realNow = Date.now
+    const oldSchedule = { ...cfgNow.schedule }
+    const oldMode = cfgNow.push.mode
+    const existing = store.allEntries().map(en => {
+      const live = store.getEntry({ user_id: en.userId })
+      return [live, live.autoCheckin]
+    })
+    existing.forEach(([en]) => { en.autoCheckin = false })
+    const entry = store.ensureEntry({ user_id: 'cf-scheduler-test', self_id: 10000 })
+    try {
+      Date.now = () => Date.parse('2026-11-04T04:10:00Z')
+      Object.assign(cfgNow.schedule, { enable: true, jitterMinutes: 0, accountDelay: [0, 0] })
+      cfgNow.push.mode = 'off'
+      setup()
+      entry.accounts = [fresh()]
+      entry.autoCheckin = true
+      let before = networkCalls.length
+      await runScheduledCheckin()
+      assert.equal(networkCalls.length, before, '普通轮次排除此站')
+      cfgNow.schedule.enable = false
+      await runScheduledCheckin({ siteOnly: true })
+      assert.equal(networkCalls.length, before, '总开关有效')
+      cfgNow.schedule.enable = true
+      entry.autoCheckin = false
+      await runScheduledCheckin({ siteOnly: true })
+      assert.equal(networkCalls.length, before, '用户开关有效')
+      entry.autoCheckin = true
+      entry.accounts[0].auto = false
+      await runScheduledCheckin({ siteOnly: true })
+      assert.equal(networkCalls.length, before, '账号开关有效')
+      entry.accounts[0].auto = true
+      const lock = tryAcquire(entry.userId, '手动操作测试')
+      try { await runScheduledCheckin({ siteOnly: true }) } finally { lock.release() }
+      assert.equal(networkCalls.length, before, '锁忙不请求')
+      assert.equal(entry.accounts[0].lastSiteAutoDay, undefined, '锁忙不能记已尝试')
+      await runScheduledCheckin({ siteOnly: true })
+      assert.equal(entry.accounts[0].lastSiteAutoDay, '2026-11-04')
+      before = networkCalls.length
+      await runScheduledCheckin({ siteOnly: true })
+      assert.equal(networkCalls.length, before, '分钟任务不重复执行')
+      const stored = JSON.parse(fs.readFileSync(path.join(DATA, 'accounts.json'), 'utf8'))
+      assert.equal(stored['u:cf-scheduler-test'].accounts[0].lastSiteAutoDay, '2026-11-04', '去重状态落盘')
+      // finalizeCheckinResult 使用 new Date()；显式固定前次成功时间，避免测试随真实日期漂移。
+      entry.accounts[0].lastCheckinAt = '2026-11-04T04:10:00.000Z'
+      Date.now = () => Date.parse('2026-11-05T04:10:00Z')
+      setup()
+      await runScheduledCheckin({ siteOnly: true })
+      assert.equal(entry.accounts[0].lastSiteAutoDay, '2026-11-05', '次日可以再次签到')
+      // 前一轮未完成时保留待办，下一个分钟检查补跑。
+      setup()
+      entry.accounts = [fresh()]
+      let resolveStatus
+      let enteredStatus
+      const entered = new Promise(resolve => { enteredStatus = resolve })
+      const statusGate = new Promise(resolve => { resolveStatus = resolve })
+      // 在随机延迟处挂起任务，验证两个入口共用 running 锁。
+      const savedRandom = Math.random
+      const realSetTimeout = global.setTimeout
+      try {
+        cfgNow.schedule.jitterMinutes = 1
+        Math.random = () => 0.5
+        global.setTimeout = (fn, ms, ...args) => {
+          if (ms === 30000) {
+            enteredStatus()
+            statusGate.then(fn)
+            return { unref() {} }
+          }
+          return realSetTimeout(fn, ms, ...args)
+        }
+        const active = runScheduledCheckin({ siteOnly: true })
+        await entered
+        const concurrentCalls = networkCalls.length
+        await runScheduledCheckin({ siteOnly: true })
+        assert.equal(networkCalls.length, concurrentCalls, '上一轮运行中不能抢跑')
+        assert.equal(entry.accounts[0].lastSiteAutoDay, undefined)
+        resolveStatus()
+        await active
+        assert.equal(entry.accounts[0].lastSiteAutoDay, '2026-11-05')
+      } finally {
+        resolveStatus?.()
+        Math.random = savedRandom
+        global.setTimeout = realSetTimeout
+        cfgNow.schedule.jitterMinutes = 0
+      }
+      // 筛选全部排除时不渲染、不推送。
+      const { currentHost } = await import('../host/index.js')
+      const previousHost = currentHost()
+      let rendered = 0
+      installHost({ ...previousHost, renderTemplate: async () => { rendered++; return false } })
+      try {
+        cfgNow.push.mode = 'private'
+        await runScheduledCheckin({ siteOnly: true })
+        assert.equal(rendered, 0)
+      } finally { installHost(previousHost); cfgNow.push.mode = 'off' }
+
+      // 失败同样只执行一轮，避免每分钟重试刷屏。
+      entry.accounts = [fresh()]
+      setup()
+      routes[`POST ${base}/api/checkin`] = { status: 403, body: { code: 403, message: '禁止访问' } }
+      await runScheduledCheckin({ siteOnly: true })
+      assert.equal(entry.accounts[0].lastSiteAutoDay, '2026-11-05')
+      before = networkCalls.length
+      await runScheduledCheckin({ siteOnly: true })
+      assert.equal(networkCalls.length, before)
+    } finally {
+      Date.now = realNow
+      Object.assign(cfgNow.schedule, oldSchedule)
+      cfgNow.push.mode = oldMode
+      existing.forEach(([en, auto]) => { en.autoCheckin = auto })
+      entry.autoCheckin = false
+    }
+    console.log('ChatflowsAI 接口与午后调度链路 OK')
+  }
+
   console.log('\n全部行为测试通过 ✓')
 } finally {
   global.fetch = realFetch

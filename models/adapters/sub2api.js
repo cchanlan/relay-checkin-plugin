@@ -2,6 +2,7 @@ import { request } from './common.js'
 import { sub2apiLogin } from '../browser.js'
 import { persist } from '../store.js'
 import { logger } from '../../host/index.js'
+import { isChatflows } from '../checkin-policy.js'
 
 /**
  * Sub2API（自研 Go 网关，前端标题 "Sub2API - AI API Gateway"）
@@ -48,6 +49,10 @@ const CHECKIN_SHAPES = [
     claimPath: '/tbe-sponsor-checkin/normal/claim'
   }
 ]
+const CHATFLOWS_SHAPE = {
+  name: 'chatflows', kind: 'chatflows', apiPrefix: '/api',
+  statusPath: '/checkin/status', claimPath: '/checkin'
+}
 const checkinShapeCache = new Map()
 
 // attempt 相关的失败都由服务端判定上下文（IP、指纹、有效期），重试没有意义，
@@ -77,8 +82,8 @@ function hostOf(account) {
   try { return new URL(account.baseUrl).hostname } catch { return String(account.baseUrl || '') }
 }
 
-function apiUrl(account, path) {
-  return `${account.baseUrl}${API}${path}`
+function apiUrl(account, path, apiPrefix = API) {
+  return `${account.baseUrl}${apiPrefix}${path}`
 }
 
 /**
@@ -284,11 +289,11 @@ function applyTokens(account, data) {
 /**
  * 带 access_token 发请求，遇 401/INVALID_TOKEN 自动续期重试一次
  */
-async function authed(account, path, { method = 'GET', body = null, allowBrowser = true } = {}) {
+async function authed(account, path, { method = 'GET', body = null, allowBrowser = true, apiPrefix = API } = {}) {
   let auth = await ensureToken(account, { allowBrowser })
   if (!auth.ok) return { authFailed: true, msg: auth.msg }
 
-  const send = token => request(apiUrl(account, path), {
+  const send = token => request(apiUrl(account, path, apiPrefix), {
     method,
     headers: { Authorization: `Bearer ${token}` },
     body
@@ -340,13 +345,13 @@ const adapter = {
   async getCheckinStatus(account) {
     const host = hostOf(account)
     const cached = checkinShapeCache.get(host)
-    const shapes = cached ? [cached] : CHECKIN_SHAPES
+    const shapes = isChatflows(account) ? [CHATFLOWS_SHAPE] : (cached ? [cached] : CHECKIN_SHAPES)
     for (let i = 0; i < shapes.length; i++) {
       const shape = shapes[i]
       const isLast = i + 1 >= shapes.length
       let res
       try {
-        res = await authed(account, shape.statusPath)
+        res = await authed(account, shape.statusPath, { apiPrefix: shape.apiPrefix })
       } catch (err) {
         // 探测阶段的请求异常先让给下一个形态；到最后一个还失败才算真失败
         if (!isLast) continue
@@ -358,9 +363,10 @@ const adapter = {
       if (res.status === 404) return { supported: false }
       if (!cached) {
         checkinShapeCache.set(host, shape)
-        logger.info(`[relay-checkin-plugin] ${host} 使用 ${shape.name} 版签到接口（${API}${shape.statusPath}）`)
+        logger.info(`[relay-checkin-plugin] ${host} 使用 ${shape.name} 版签到接口（${shape.apiPrefix || API}${shape.statusPath}）`)
       }
-      const parsedStatus = shape.kind === 'tbe' ? parseTbeStatus(res) : parseCheckinStatus(res)
+      const parsedStatus = shape.kind === 'chatflows' ? parseChatflowsStatus(res)
+        : shape.kind === 'tbe' ? parseTbeStatus(res) : parseCheckinStatus(res)
       return { ...parsedStatus, shape }
     }
     return { supported: false }
@@ -396,6 +402,7 @@ const adapter = {
 
     const shape = status.shape || checkinShapeCache.get(hostOf(account)) || CHECKIN_SHAPES[1]
     if (shape.kind === 'tbe') return await tbeCheckin(account, shape, status)
+    if (shape.kind === 'chatflows') return await chatflowsCheckin(account, shape)
     // 新版是三步：attempt 换 attempt_id → 过码 → 带 attempt_id + captcha_token 提交。
     // attempt 自带 expires_at 且服务端会校验 IP/上下文，所以取到就要尽快过码提交。
     let attemptId = ''
@@ -476,6 +483,44 @@ const adapter = {
   async renew(account) {
     return await renewByRefreshToken(account)
   }
+}
+
+/** 自定义签到页 /checkin/：与主站共用 Bearer，接口不带 /v1。真机仅在 Linux/JiuLi 验证。 */
+export function parseChatflowsStatus(res) {
+  const { ok, data } = unwrap(res)
+  if (res.status !== 200 || !ok || typeof data?.can_checkin !== 'boolean'
+    || typeof data?.checked_in !== 'boolean' || data.can_checkin === data.checked_in) {
+    logger.warn(`[relay-checkin-plugin] ChatflowsAI 状态异常（HTTP ${res.status}｜${res.json?.code}）：${res.json?.message || '响应字段异常'}`)
+    return { supported: true, ok: false, msg: '签到状态查询失败，请稍后重试' }
+  }
+  return {
+    supported: true, ok: true, enabled: true, checked: data.checked_in,
+    captchaRequired: false,
+    awardText: data.checked_in && data.amount != null ? usd(data.amount) : null,
+    balanceText: data.balance != null ? usd(data.balance) : null
+  }
+}
+
+async function chatflowsCheckin(account, shape) {
+  const res = await authed(account, shape.claimPath, { method: 'POST', apiPrefix: shape.apiPrefix })
+  if (res.authFailed) return { ok: false, already: false, msg: res.msg }
+  const { ok, data } = unwrap(res)
+  if (res.status === 409 || String(res.json?.code) === '409') {
+    // 领取与状态查询可能有并发，409 后复核本轮状态，不凭错误码宣称已领取。
+    const statusRes = await authed(account, shape.statusPath, { apiPrefix: shape.apiPrefix })
+    const status = statusRes.authFailed ? null : parseChatflowsStatus(statusRes)
+    if (status?.ok && status.checked) {
+      return { ok: true, already: true, confirmed: true, awardText: status.awardText, balanceText: status.balanceText }
+    }
+  } else if (res.status >= 200 && res.status < 300 && ok
+    && data?.amount != null && Number.isFinite(Number(data.amount))) {
+    return {
+      ok: true, already: false, confirmed: true, awardText: usd(data.amount),
+      balanceText: data.balance != null ? usd(data.balance) : null
+    }
+  }
+  logger.warn(`[relay-checkin-plugin] ChatflowsAI 领取失败（HTTP ${res.status}｜${res.json?.code}）：${res.json?.message || '响应字段异常'}`)
+  return { ok: false, already: false, msg: '签到未完成，请稍后重试' }
 }
 
 /**

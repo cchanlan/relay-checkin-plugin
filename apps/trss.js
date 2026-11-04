@@ -10,6 +10,7 @@
 import { COMMAND_RULES, CHECKIN_TASK_NAME, RelayCheckinCore } from './checkin.js'
 import { getConfig } from '../models/config.js'
 import { runScheduledCheckin } from '../models/scheduler.js'
+import { SITE_CHECKIN_CRON, SITE_CHECKIN_TASK_NAME } from '../models/checkin-policy.js'
 
 export default class RelayCheckinApp extends plugin {
   constructor() {
@@ -28,6 +29,11 @@ export default class RelayCheckinApp extends plugin {
       name: CHECKIN_TASK_NAME,
       cron: getConfig().schedule.cron,
       fnc: () => runScheduledCheckin()
+    }, {
+      name: SITE_CHECKIN_TASK_NAME,
+      cron: SITE_CHECKIN_CRON,
+      log: false,
+      fnc: () => runScheduledCheckin({ siteOnly: true })
     }]
   }
 }

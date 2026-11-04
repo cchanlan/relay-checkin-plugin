@@ -580,17 +580,26 @@ export function combineCheckinResults(rows) {
  * 对一个用户条目的全部（或指定序号）账号执行签到
  * @param {object} entry 存储条目
  * @param {object} opts { index: 1起的序号(可选), delayRange: [min,max]秒(可选，账号间随机间隔),
- *                        autoOnly: 仅执行定时开关打开的账号（定时任务用） }
+ *                        autoOnly: 仅执行定时开关打开的账号（定时任务用），
+ *                        accountFilter: 执行前筛选账号，onAccountDone: 每个实际尝试完成后回调 }
  */
-export async function checkinEntry(entry, { index = null, delayRange = null, autoOnly = false } = {}) {
+export async function checkinEntry(entry, { index = null, delayRange = null, autoOnly = false, accountFilter = null, onAccountDone = null } = {}) {
   let accounts = index ? [entry.accounts[index - 1]].filter(Boolean) : entry.accounts
   if (autoOnly) accounts = accounts.filter(acc => acc.auto !== false)
+  if (accountFilter) accounts = accounts.filter(accountFilter)
   const results = []
   for (let i = 0; i < accounts.length; i++) {
     if (i > 0 && delayRange) {
       await sleep(randInt(delayRange[0], delayRange[1]) * 1000)
     }
-    results.push(combineCheckinResults(await checkinAccountResults(accounts[i])))
+    // 等待账号间隔期间可能跨日，执行前重新判断，避免旧批次签进新周期。
+    if (accountFilter && !accountFilter(accounts[i])) continue
+    try {
+      results.push(combineCheckinResults(await checkinAccountResults(accounts[i])))
+    } finally {
+      onAccountDone?.(accounts[i])
+      if (onAccountDone) safePersist()
+    }
   }
   safePersist()
   return results
