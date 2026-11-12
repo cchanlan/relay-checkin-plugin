@@ -88,11 +88,22 @@ async function proxiedRequest(url, { method, headers, body, timeoutMs, proxyUrl 
   const agent = await getProxyAgent(proxyUrl)
   const { request: httpsRequest } = await import('node:https')
   return await new Promise((resolve, reject) => {
+    // 握手完成才算「请求可能已经发出」：TLS 握手（含代理 CONNECT）阶段失败时目标站点
+    // 一个字节都没收到，连非幂等的签到 POST 也能安全重发。
+    let secureConnected = false
+    // 超时必须是「一定能结束」的兜底：代理 CONNECT 阶段挂起时 req.destroy() 不保证触发
+    // 'error'，只靠事件驱动会把请求一直挂着。
+    let settled = false
+    const finish = (fn, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fn(value)
+    }
     const req = httpsRequest(url, { method, headers, agent }, res => {
       const chunks = []
       res.on('data', c => chunks.push(c))
       res.on('end', () => {
-        clearTimeout(timer)
         const text = Buffer.concat(chunks).toString('utf8')
         let json = null
         try {
@@ -100,7 +111,7 @@ async function proxiedRequest(url, { method, headers, body, timeoutMs, proxyUrl 
         } catch {
           // 非 JSON 响应
         }
-        resolve({
+        finish(resolve, {
           status: res.statusCode,
           json,
           contentType: String(res.headers['content-type'] || ''),
@@ -112,10 +123,26 @@ async function proxiedRequest(url, { method, headers, body, timeoutMs, proxyUrl 
         })
       })
     })
-    const timer = setTimeout(() => req.destroy(new Error('代理请求超时，请稍后重试')), timeoutMs)
+    req.on('socket', socket => {
+      if (!socket?.encrypted) return
+      // 顺序很关键：socket 交给请求时 _secureEstablished 仍是 false，握手完成才置 true。
+      // 复用连接池里已握手的 socket 不会再触发 secureConnect，两个判据都要看。
+      // （getProtocol() 在握手前就会返回版本号，不能拿来判断。）
+      if (socket._secureEstablished === true) {
+        secureConnected = true
+        return
+      }
+      socket.once('secureConnect', () => { secureConnected = true })
+    })
+    const timer = setTimeout(() => {
+      finish(reject, new Error('代理请求超时，请稍后重试'))
+      req.destroy()
+    }, timeoutMs)
     req.on('error', err => {
-      clearTimeout(timer)
-      reject(err)
+      // 握手没完成就被对端拒掉（典型：边缘节点偶发回 SSL alert 40 handshake failure）：
+      // 请求一个字节都没发出去，可以安全重发。自己发起的超时不算（可能已经送达）。
+      if (!secureConnected) err.preRequestFailure = true
+      finish(reject, err)
     })
     if (body != null) req.write(body)
     req.end()
@@ -159,6 +186,9 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
   const idempotent = ['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)
   // 签到 POST 不能自动重试：第一次可能已在服务端成功，只是响应在途中丢失。
   const retries = idempotent ? (maxRetry ?? (cfg.request.retry ?? 2)) : 0
+  // 例外：连接在「请求发出前」就失败（TLS 握手被拒、代理都连不上）时服务端必然没收到，
+  // 即便非幂等也能安全重发。边缘节点偶发的 SSL alert 40 就属于这一类。
+  const preRequestRetries = idempotent ? 0 : 2
   // 收到「明确否定」的状态码（网关 502/503/504 等）时可以重试：此时服务端一定没有
   // 成功，重发不存在「可能已生效」的风险。只有调用方显式传 retryStatuses 才启用，
   // 重试次数取显式 maxRetry（非幂等请求不会因此被默认重发）。
@@ -190,6 +220,7 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
   // 状态码重试只认明确否定的应答（服务端一定没成功，重发安全）。
   let transportRetriesUsed = 0
   let statusRetriesUsed = 0
+  let preRequestRetriesUsed = 0
   const shouldRetryStatus = response => {
     if (!statusRetries || statusRetriesUsed >= statusRetries) return false
     if (!retryableStatuses.includes(Number(response?.status))) return false
@@ -202,10 +233,10 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
   const sleepBeforeRetry = () => (retryDelayMs > 0
     ? new Promise(resolve => setTimeout(resolve, retryDelayMs))
     : null)
-  // 传输层重试（仅幂等请求）与状态码重试（显式 opt-in）共用这个循环。两类预算
-  // 各自计数、互不挤占，所以上界必须是「两者之和」：取较大值会让先耗尽的那类
-  // 提前结束循环，另一类没花完的预算被白白丢掉。
-  const maxAttempts = retries + statusRetries
+  // 三类重试共用这个循环：传输层（仅幂等）、状态码（显式 opt-in）、请求未发出（含非幂等）。
+  // 三类预算各自计数、互不挤占，所以上界必须是总和：取较大值会让先耗尽的那类提前结束
+  // 循环，别的类没花完的预算被白白丢掉。
+  const maxAttempts = retries + statusRetries + preRequestRetries
   for (let attempt = 0; attempt <= maxAttempts; attempt++) {
     if (proxyUrl) {
       try {
@@ -226,6 +257,13 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
         return response
       } catch (err) {
         lastErr = err
+        // 握手阶段失败 = 请求一个字节都没发出去：先用这块预算，不够再走幂等预算
+        if (err?.preRequestFailure && preRequestRetriesUsed < preRequestRetries) {
+          preRequestRetriesUsed++
+          logger.info(`[relay-checkin-plugin] ${normalizedMethod} ${requestPathname(targetUrl)} 在请求发出前失败`
+            + `（${err?.message || err}），重试 ${preRequestRetriesUsed}/${preRequestRetries}`)
+          continue
+        }
         if (transportRetriesUsed >= retries) break
         transportRetriesUsed++
         continue
@@ -284,7 +322,22 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
   // 用户只会看到「连不上」这类人话，真实原因（超时/DNS/证书）只有这里留得住。
   // 只记 pathname：查询串里可能带一次性令牌。
   logger.warn(`[relay-checkin-plugin] ${normalizedMethod} ${requestPathname(targetUrl)} 请求失败: ${lastErr?.message || lastErr}`)
-  throw new Error(`${normalizedMethod} 请求失败: ${lastErr?.message || lastErr}`)
+  throw new Error(`${normalizedMethod} 请求失败: ${friendlyTransportError(lastErr) || lastErr?.message || lastErr}`)
+}
+
+/**
+ * 传输层错误翻成人话：OpenSSL 的 alert 编号（如 alert 40 = handshake failure）对用户没有
+ * 意义，但「站点在握手阶段拒绝」这层含义必须说清，否则会被误读成 Cookie / 密码错误。
+ */
+function friendlyTransportError(err) {
+  const text = String(err?.message || '')
+  if (/alert number 40|handshake failure/i.test(text)) {
+    return '站点在 TLS 握手阶段拒绝了连接（边缘节点偶发），重试后仍未成功'
+  }
+  if (/ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/i.test(text)) {
+    return '连不上站点（网络或代理不通），重试后仍未成功'
+  }
+  return ''
 }
 
 function responseSetCookies(headers) {
