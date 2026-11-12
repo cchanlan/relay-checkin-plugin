@@ -118,6 +118,17 @@ function extractCookieValue(raw, name) {
   return text.replace(new RegExp(`^${name}=`, 'i'), '')
 }
 
+/**
+ * 整串 Cookie 带空格（acw_tc=…; acw_sc__v2=…; session=…）时，消息会先被拆成多段参数，
+ * 这里把多段拼回去。只有拼出的文本里确实能找到目标 cookie 才认，避免把真正的参数错误吞掉。
+ */
+function joinCookieTokens(tokens, name) {
+  if (tokens.length < 2) return null
+  const joined = tokens.join(' ').trim()
+  const value = extractCookieValue(joined, name)
+  return value && value !== joined ? joined : null
+}
+
 function agentRouterCookieHint(site) {
   if (preferredBindingForHost(site?.host) !== 'email') return null
   return `检测到 ${site.host} 是 AgentRouter，Cookie 只能查询余额，不能自动领取每日 $25。请改用：\n#中转添加邮箱 ${site.baseUrl}\n随后私聊发送：邮箱 AgentRouter站内密码`
@@ -666,7 +677,7 @@ export class RelayCheckinCore {
     const need = {
       cookie: isMintHost(site.host)
         ? 'auth_token值（在浏览器登录该站点后按 F12，在 Application → Cookies 里复制 auth_token 的值）'
-        : 'session值 用户ID（空格分隔）',
+        : 'session值 用户ID（空格分隔；整串 Cookie 可整段粘贴）',
       email: `邮箱 ${emailPasswordLabel(site)}（空格分隔）`,
       // 站点没有可复制的「令牌」入口，必须告诉用户去哪取，否则根本无从下手
       refresh: '刷新令牌（在电脑浏览器登录该站点后按 F12，在 Console 执行：'
@@ -784,9 +795,10 @@ export class RelayCheckinCore {
       await this.reply('站点地址格式不正确或被安全策略拒绝，请填写 HTTPS 站点根地址，例如：#中转添加cookie https://xx.com session值 用户ID')
       return true
     }
-    // 薄荷没有站点用户ID，只认一个 auth_token，所以这里只收两段参数
+    // 薄荷没有站点用户ID，只认一个 auth_token；整串 Cookie 带空格时会被拆成多段
     if (isMintHost(site.host)) {
-      if (args.length !== 2) {
+      const rawToken = args.length === 2 ? args[1] : joinCookieTokens(args.slice(1), 'auth_token')
+      if (!rawToken) {
         await this.reply(args.length > 2
           ? '参数过多：#中转添加cookie 地址 auth_token值'
           : '缺少 auth_token，格式：#中转添加cookie 地址 auth_token值（或只发地址走私聊绑定）')
@@ -794,7 +806,7 @@ export class RelayCheckinCore {
       }
       await this.runLocked('添加账号', async () => {
         await this.reply('正在验证账号，请稍候...')
-        const r = await this.verifyCookie(site, args[1], null)
+        const r = await this.verifyCookie(site, rawToken, null)
         if (!r.ok) {
           await this.reply(`添加失败：${r.msg}`)
           return
@@ -803,16 +815,23 @@ export class RelayCheckinCore {
       })
       return true
     }
-    if (args.length !== 3) {
+    // 整串 Cookie 带空格时会拆成多段，最后一段仍是站点用户ID
+    let rawSession = args[1]
+    let siteUserId = args[2]
+    if (args.length > 3) {
+      rawSession = joinCookieTokens(args.slice(1, -1), 'session')
+      siteUserId = args.at(-1)
+    }
+    if (!rawSession || args.length < 3) {
       await this.reply(args.length === 2
         ? '缺少站点用户ID，格式：#中转添加cookie 地址 session值 用户ID（或只发地址走私聊绑定）'
-        : '参数过多：#中转添加cookie 地址 session值 用户ID（session 中不能含空格）')
+        : '参数过多：#中转添加cookie 地址 session值 用户ID（整串 Cookie 可直接粘贴）')
       return true
     }
 
     await this.runLocked('添加账号', async () => {
       await this.reply('正在验证账号，请稍候...')
-      const r = await this.verifyCookie(site, args[1], args[2])
+      const r = await this.verifyCookie(site, rawSession, siteUserId)
       if (!r.ok) {
         await this.reply(`添加失败：${r.msg}`)
         return
@@ -963,16 +982,27 @@ export class RelayCheckinCore {
     }
     // 薄荷没有站点用户ID，只发一个 auth_token 就够
     const mintBind = pending.kind === 'cookie' && isMintHost(pending.host)
-    if (mintBind && parts.length !== 1) {
-      const fmt = prefixed ? '中转绑定 auth_token值' : 'auth_token值'
-      await this.reply(`请只发送一个值：${fmt}（在浏览器登录后从 Cookie 里复制 auth_token）`)
-      return true
-    }
-    if (pending.kind === 'cookie' && !mintBind && parts.length !== 2) {
-      // 用户走「中转绑定」前缀（disablePrivate 放行）时，重发也必须带前缀才不被拦截
-      const fmt = prefixed ? '中转绑定 session值 用户ID' : 'session值 用户ID'
-      await this.reply(`请一次性发送：${fmt}（空格分隔，不能多填参数）`)
-      return true
+    // 整串 Cookie 带空格时会被拆成多段：薄荷要整段拼回去，其余站点最后一段仍是用户ID
+    let cookieInput = null
+    if (pending.kind === 'cookie') {
+      if (mintBind) {
+        cookieInput = parts.length === 1 ? parts[0] : joinCookieTokens(parts, 'auth_token')
+        if (!cookieInput) {
+          const fmt = prefixed ? '中转绑定 auth_token值' : 'auth_token值'
+          await this.reply(`请只发送一个值：${fmt}（在浏览器登录后从 Cookie 里复制 auth_token）`)
+          return true
+        }
+      } else {
+        cookieInput = parts.length === 2
+          ? parts[0]
+          : (parts.length > 2 ? joinCookieTokens(parts.slice(0, -1), 'session') : null)
+        if (!cookieInput) {
+          // 用户走「中转绑定」前缀（disablePrivate 放行）时，重发也必须带前缀才不被拦截
+          const fmt = prefixed ? '中转绑定 session值 用户ID' : 'session值 用户ID'
+          await this.reply(`请一次性发送：${fmt}（空格分隔；整串 Cookie 可直接粘贴）`)
+          return true
+        }
+      }
     }
     if (pending.kind === 'email' && parts.length !== 2) {
       const label = emailPasswordLabel(pending)
@@ -1004,7 +1034,7 @@ export class RelayCheckinCore {
         await this.reply('正在验证账号，请稍候...')
         let r
         if (pending.kind === 'cookie') {
-          r = await this.verifyCookie(site, parts[0], parts[1] ?? null)
+          r = await this.verifyCookie(site, cookieInput, mintBind ? null : parts.at(-1))
         } else if (pending.kind === 'email') {
           r = await this.verifyEmail(site, parts[0], parts[1])
         } else if (pending.kind === 'refresh') {
