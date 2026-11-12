@@ -5,7 +5,7 @@
 支持 **new-api、Veloera 及同源魔改站、AnyRouter、AgentRouter、Sub2API、薄荷公益站**，站点类型自动识别。
 宿主支持 **TRSS-Yunzai**（OneBot v11）与 **[Yunzai NG](https://github.com/Yunzai-NG/yunzai-ng)**。
 
-> **本仓库是 Fork**，上游 [Cat-bl/relay-checkin-plugin](https://github.com/Cat-bl/relay-checkin-plugin)；
+> **本仓库基于 [Cat-bl/relay-checkin-plugin](https://github.com/Cat-bl/relay-checkin-plugin) 改造，独立维护、不同步上游**；
 > 两个镜像同步更新：[GitHub](https://github.com/cchanlan/relay-checkin-plugin) · [GitCode](https://gitcode.com/ccxhan/relay-checkin-plugin)（国内更快）
 
 ## 相对上游新增
