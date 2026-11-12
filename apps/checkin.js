@@ -105,6 +105,19 @@ function specializedBindingHint(site) {
   return null
 }
 
+/**
+ * 用户常把浏览器里整串 Cookie 一起贴进来（acw_tc=…;acw_sc__v2=…;session=…），
+ * 这里统一取出目标 cookie 的值：命中 name=value 就取该值，否则按原样去掉前缀。
+ * 只做「多贴了也不出错」的容错，不改变只贴裸值的既有行为。
+ */
+function extractCookieValue(raw, name) {
+  const text = String(raw ?? '').trim()
+  if (!text) return ''
+  const hit = text.match(new RegExp(`(?:^|;\\s*)${name}=([^;\\s]+)`, 'i'))
+  if (hit) return hit[1]
+  return text.replace(new RegExp(`^${name}=`, 'i'), '')
+}
+
 function agentRouterCookieHint(site) {
   if (preferredBindingForHost(site?.host) !== 'email') return null
   return `检测到 ${site.host} 是 AgentRouter，Cookie 只能查询余额，不能自动领取每日 $25。请改用：\n#中转添加邮箱 ${site.baseUrl}\n随后私聊发送：邮箱 AgentRouter站内密码`
@@ -381,7 +394,7 @@ export class RelayCheckinCore {
   async verifyCookie(site, rawSession, siteUserId) {
     // 薄荷的 cookie 名是 auth_token，用户可能连 "auth_token=" 一起贴进来；其余站点贴的是 session
     const isMint = isMintHost(site.host)
-    const token = String(rawSession).replace(isMint ? /^auth_token=/i : /^session=/i, '')
+    const token = extractCookieValue(rawSession, isMint ? 'auth_token' : 'session')
     // 薄荷没有 new-api 的 /api/user/self，探测必然 404，直接按域名规则校验
     if (isMint) {
       const account = {
