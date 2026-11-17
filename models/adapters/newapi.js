@@ -125,6 +125,21 @@ export default {
   checkinPath: '/api/user/checkin',
   compareBalance: true,
 
+  /**
+   * 同一账号的状态、提交和浏览器验证必须使用同一路径。
+   * UltraRouter 的公开个人设置页改用了 daily-9f3k，响应结构仍是 new-api。
+   * 仅 Linux/JiuLi 真机验证过；路径选择本身不依赖平台或宿主。
+   */
+  getCheckinPath(account) {
+    if (account.signPath) return account.signPath
+    try {
+      if (new URL(account.baseUrl).hostname === 'ultrarouter.org') return '/api/user/daily-9f3k'
+    } catch {
+      // 无效地址仍由请求层统一校验。
+    }
+    return this.checkinPath
+  },
+
   buildHeaders(account) {
     const headers = { 'Content-Type': 'application/json' }
     if (account.authMode === 'session') {
@@ -166,7 +181,7 @@ export default {
     const now = new Date()
     const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
     const today = `${month}-${String(now.getDate()).padStart(2, '0')}`
-    const res = await request(`${account.baseUrl}/api/user/checkin?month=${month}`, {
+    const res = await request(`${account.baseUrl}${this.getCheckinPath(account)}?month=${month}`, {
       ...TRANSIENT_RETRY,
       headers: this.buildHeaders(account)
     })
@@ -182,12 +197,14 @@ export default {
       supported: true,
       ok: true,
       checked: stats.checked_in_today,
-      awardQuota: todayRecord?.quota_awarded ?? null
+      awardQuota: todayRecord?.quota_awarded ?? null,
+      // 某些站点只在签到状态中公开此 key，/api/status 不一定含有它。
+      turnstileSiteKey: res.json.data.turnstile_site_key || null
     }
   },
 
   async checkin(account) {
-    const url = `${account.baseUrl}/api/user/checkin`
+    const url = `${account.baseUrl}${this.getCheckinPath(account)}`
     let res = await request(url, {
       ...TRANSIENT_RETRY,
       method: 'POST',

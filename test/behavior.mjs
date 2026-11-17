@@ -844,6 +844,66 @@ try {
   assert.equal(already.statusText, '本轮前已签到')
   assert.equal(already.award, '今日 +$0.50')
 
+  // ---- 7.1b UltraRouter：独立路径用于查询、提交和浏览器验证 ----
+  cfgNow.security.allowedPrivateHosts.push('ultrarouter.org')
+  const ultra = { name: 'ultrarouter.org', baseUrl: 'https://ultrarouter.org', type: 'newapi', token: 'TEST', siteUserId: 1 }
+  const ultraPath = '/api/user/daily-9f3k'
+  assert.equal(newapiAdapter.getCheckinPath(ultra), ultraPath)
+  assert.equal(newapiAdapter.getCheckinPath({ ...ultra, signPath: '/api/user/custom-checkin' }), '/api/user/custom-checkin')
+  assert.equal(newapiAdapter.getCheckinPath({ ...ultra, baseUrl: 'https://other-ultrarouter.org' }), '/api/user/checkin')
+  assert.equal(newapiAdapter.getCheckinPath({ ...ultra, baseUrl: 'https://ultrarouter.org.example.com' }), '/api/user/checkin')
+  assert.equal(newapiAdapter.getCheckinPath({ ...ultra, baseUrl: 'https://newapi.test' }), '/api/user/checkin')
+  let ultraChecked = false
+  let ultraPosts = 0
+  const ultraCallsStart = networkCalls.length
+  routes = {
+    [`GET ${ultra.baseUrl}${ultraPath}?month=${month}`]: () => ({
+      body: { success: true, data: {
+        turnstile_enabled: true, turnstile_site_key: 'TEST_SITE_KEY',
+        stats: { checked_in_today: ultraChecked, records: ultraChecked ? [{ checkin_date: today, quota_awarded: 8435470 }] : [] }
+      } }
+    }),
+    [`POST ${ultra.baseUrl}${ultraPath}`]: opts => {
+      ultraPosts++
+      assert.equal(opts.headers.Authorization, 'Bearer TEST')
+      assert.equal(opts.headers['New-Api-User'], '1')
+      ultraChecked = true
+      return { body: { success: true, data: { quota_awarded: 8435470 } } }
+    },
+    [`GET ${ultra.baseUrl}/api/user/self`]: {
+      body: { success: true, data: { id: 1, quota: 571511792, used_quota: 8403208 } }
+    }
+  }
+  const ultraBefore = await newapiAdapter.getCheckinStatus(ultra)
+  assert.equal(ultraBefore.checked, false)
+  assert.equal(ultraBefore.turnstileSiteKey, 'TEST_SITE_KEY', '签到专属 site key 必须传给验证降级链路')
+  const ultraSigned = await checkinAccount({ ...ultra })
+  assert.equal(ultraSigned.status, 'ok')
+  assert.equal(ultraSigned.award, '+$16.87')
+  assert.equal(ultraPosts, 1, '未签账号只向独立接口提交一次')
+  const ultraAlready = await checkinAccount({ ...ultra })
+  assert.equal(ultraAlready.status, 'already')
+  assert.equal(ultraAlready.statusText, '本轮前已签到')
+  assert.equal(ultraAlready.award, '今日 +$16.87')
+  assert.equal(ultraPosts, 1, '已签后不得重复提交')
+  assert.ok(!networkCalls.slice(ultraCallsStart).some(call => call.includes('/api/user/checkin')), '不得回退到已弃用的标准路径')
+
+  // 验证失败仍保留原分类；完整性头重试同样不能丢掉自定义路径。
+  let ultraIntegrityPosts = 0
+  routes = {
+    [`POST ${ultra.baseUrl}${ultraPath}`]: opts => {
+      ultraIntegrityPosts++
+      if (ultraIntegrityPosts === 1) return { body: { success: false, message: '缺少完整性标记' } }
+      assert.ok(opts.headers['X-Game-Action-Id'])
+      return { body: { success: false, message: 'Turnstile token 为空' } }
+    }
+  }
+  const ultraValidation = await newapiAdapter.checkin(ultra)
+  assert.equal(ultraValidation.ok, false)
+  assert.equal(ultraValidation.validation, 'turnstile')
+  assert.equal(ultraIntegrityPosts, 2)
+  console.log('UltraRouter 路径、奖励、已签保护与验证分类 OK')
+
   // ---- 7.2 POST 响应丢失：只发送一次，再由状态接口确认成功 ----
   let statusCalls = 0
   let selfStatusCalls = 0

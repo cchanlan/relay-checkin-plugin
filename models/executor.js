@@ -147,16 +147,18 @@ function recallSiteKey(account) {
 /**
  * Turnstile 站点浏览器降级签到：取 site key → 页面内过挑战 → 带 token 重调签到接口
  */
-async function turnstileFallback(account, adapter, checkinPath = adapter.checkinPath) {
+async function turnstileFallback(account, adapter, checkinPath = adapter.checkinPath, knownSiteKey = null) {
   const headers = adapter.buildHeaders(account)
-  let siteKey = null
-  try {
-    const { json } = await request(`${account.baseUrl}/api/status`, {
-      headers
-    })
-    siteKey = json?.data?.turnstile_site_key || null
-  } catch {
-    // 取不到 site key 走下方统一失败
+  let siteKey = knownSiteKey
+  if (!siteKey) {
+    try {
+      const { json } = await request(`${account.baseUrl}/api/status`, {
+        headers
+      })
+      siteKey = json?.data?.turnstile_site_key || null
+    } catch {
+      // 取不到 site key 走下方统一失败
+    }
   }
   if (siteKey) {
     rememberSiteKey(account, siteKey)
@@ -300,7 +302,7 @@ export async function checkinAccount(account) {
         }
         // 站点要求人机验证且浏览器方案可用时，自动降级为浏览器签到
         const validation = r?.validation || classifyValidation({ message: r?.msg })
-        const browserCheckinPath = account.signPath || adapter.checkinPath
+        const browserCheckinPath = adapter.getCheckinPath?.(account) || account.signPath || adapter.checkinPath
         // 图形验证码：不依赖浏览器，直接取码识别后重提签到
         const fallback = pickValidationFallback(r, {
           validation,
@@ -335,7 +337,7 @@ export async function checkinAccount(account) {
             // 这里以前只认 validation === 'turnstile'，于是 waf 一类既进不了浏览器、
             // 又没有别的处理，直接落地成「请求被站点 WAF/人机验证拦截」的死路。
             logger.info(`[relay-checkin-plugin] ${account.name} 需人机验证，尝试浏览器方案`)
-            r = await turnstileFallback(account, adapter, browserCheckinPath)
+            r = await turnstileFallback(account, adapter, browserCheckinPath, beforeStatus?.turnstileSiteKey)
 
             // 「人机验证 token」是 new-api 对 Turnstile 那类凭据的统称，但魔改站可能
             // 只实现了图形验证码接口。取不到 site key 时别直接判死，回退试一次图形验证码；
