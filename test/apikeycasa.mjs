@@ -13,6 +13,7 @@ if (fs.existsSync(DATA)) throw new Error('请在不含 data/ 的独立插件副�
 
 const TOKEN = 'FAKE_AUTH_TOKEN_FOR_TEST_ONLY'
 const URL = 'https://apikey.casa/api/v1/redeem/checkin'
+const USER_URL = 'https://apikey.casa/api/v1/auth/me'
 const ACCOUNT = { name: 'apikey.casa', baseUrl: 'https://apikey.casa', type: 'apikeycasa', token: TOKEN }
 const logs = []
 global.logger = Object.fromEntries(['info', 'mark', 'warn', 'error'].map(k => [k, (...args) => logs.push(args.join(' '))]))
@@ -36,10 +37,11 @@ global.fetch = async (url, opts = {}) => {
     headers: { get: () => 'application/json', getSetCookie: () => [] }
   }
 }
+const userBody = (balance = 12.34) => ({ code: 0, message: 'success', data: { id: 7, username: 'test-user', balance, frozen_balance: 0 } })
 const statusBody = (checked = false, reward = 5) => ({ code: 0, message: 'success', data: { checked_in: checked, reward, date: '2000-01-01' } })
-function reset(get, post) {
+function reset(get, post, user = { body: userBody() }) {
   calls.length = 0
-  routes = { [`GET ${URL}`]: get }
+  routes = { [`GET ${URL}`]: get, [`GET ${USER_URL}`]: user }
   if (post) routes[`POST ${URL}`] = post
 }
 const postCalls = () => calls.filter(c => c.startsWith('POST ')).length
@@ -56,7 +58,7 @@ try {
   cfg.request.retry = 2
   const { getAdapter, probeAccount, isApikeyCasaHost, preferredBindingForHost } = await import('../models/adapters/index.js')
   const adapter = getAdapter('apikeycasa')
-  const { checkinAccount } = await import('../models/executor.js')
+  const { checkinAccount, queryEntry, refreshBalances } = await import('../models/executor.js')
 
   await test('官方主机严格识别与适配器注册', async () => {
     for (const host of ['apikey.casa', 'APIKEY.CASA', 'apikey.casa.']) assert.equal(isApikeyCasaHost(host), true)
@@ -65,28 +67,29 @@ try {
     assert.equal(preferredBindingForHost('apikey.casa'), null)
   })
 
-  await test('账号探测只读专用接口与 Bearer 鉴权', async () => {
-    reset(opts => {
+  await test('账号探测只读个人信息接口与 Bearer 鉴权', async () => {
+    reset({ body: statusBody(false) }, null, opts => {
       assert.equal(opts.headers.Authorization, `Bearer ${TOKEN}`)
-      return { body: statusBody(false) }
+      return { body: userBody() }
     })
     const probe = await probeAccount(ACCOUNT.baseUrl, TOKEN, null)
     assert.equal(probe.ok, true)
     assert.equal(probe.type, 'apikeycasa')
-    assert.equal(probe.info.balanceText, '-')
+    assert.equal(probe.info.balanceText, '$12.34')
     assert.equal(probe.info.quota, null)
-    assert.equal(probe.info.siteUserId, null)
-    assert.equal(probe.info.checkedIn, false)
-    assert.deepEqual(calls, [`GET ${URL}`])
+    assert.equal(probe.info.siteUserId, 7)
+    assert.equal(probe.info.checkedIn, null)
+    assert.deepEqual(calls, [`GET ${USER_URL}`])
   })
 
   await test('无效 token 探测不回退 new-api/Veloera', async () => {
-    reset({ status: 401, body: { code: 'UNAUTHORIZED', message: TOKEN } })
+    const denied = { status: 401, body: { code: 'UNAUTHORIZED', message: TOKEN } }
+    reset(denied, null, denied)
     const probe = await probeAccount(ACCOUNT.baseUrl, TOKEN, '9')
     assert.equal(probe.ok, false)
     assert.match(probe.msg, /重新登录.*更新 Auth token/)
     assert.ok(!probe.msg.includes(TOKEN))
-    assert.deepEqual(calls, [`GET ${URL}`])
+    assert.deepEqual(calls, [`GET ${USER_URL}`])
   })
 
   await test('未签状态不虚报已领取奖励', async () => {
@@ -205,14 +208,14 @@ try {
     const result = await checkinAccount(account)
     assert.equal(result.status, 'ok')
     assert.equal(result.award, '+$5.00')
-    assert.equal(result.balance, '-')
+    assert.equal(result.balance, '$12.34')
     assert.equal(result.awardQuotaValue, null)
     assert.equal(account.lastCheckinConfirmed, true)
     const again = await checkinAccount(account)
     assert.equal(again.status, 'already')
     assert.equal(again.award, '今日 +$5.00')
     assert.equal(postCalls(), 1)
-    assert.ok(calls.every(c => c.endsWith(URL)))
+    assert.ok(calls.every(c => c.endsWith(URL) || c.endsWith(USER_URL)))
   })
 
   await test('POST 响应丢失只读复核成功、不重试', async () => {
@@ -239,13 +242,90 @@ try {
   })
 
   await test('执行器遇到无效 token 也不能提交，日志不含凭据', async () => {
-    reset({ status: 401, body: { code: 'INVALID_TOKEN', message: TOKEN } })
+    reset({ status: 401, body: { code: 'INVALID_TOKEN', message: TOKEN } }, null, { status: 401, body: { code: 'INVALID_TOKEN', message: TOKEN } })
     const result = await checkinAccount({ ...ACCOUNT })
     assert.equal(result.status, 'fail')
     assert.match(result.msg, /重新登录.*更新 Auth token/)
     assert.equal(postCalls(), 0)
     assert.ok(logs.every(line => !line.includes(TOKEN)))
   })
+  await test('余额保持原始美元单位、零值/小数/字符串/负值可用', async () => {
+    for (const [balance, expected] of [[0, '$0.00'], ['0', '$0.00'], [12.3456, '$12.35'], ['10.125', '$10.13'], [-2.5, '$-2.50']]) {
+      reset({ body: statusBody(false, 5) }, null, { body: { ...userBody(balance), data: { ...userBody(balance).data, frozen_balance: 100 } } })
+      const info = await adapter.userInfo({ ...ACCOUNT, baseUrl: ACCOUNT.baseUrl + '/' })
+      assert.equal(info.ok, true)
+      assert.equal(info.balanceText, expected)
+      assert.equal(info.quota, null)
+      assert.equal(info.usedQuota, null)
+      assert.equal(info.usedText, '-')
+      assert.equal(info.siteUserId, 7)
+      assert.equal(info.username, 'test-user')
+      assert.deepEqual(calls, [`GET ${USER_URL}`])
+    }
+  })
+
+  await test('余额查询独立于签到状态，不需要签到接口正常', async () => {
+    reset({ status: 404, body: {} })
+    const info = await adapter.userInfo(ACCOUNT)
+    assert.equal(info.ok, true)
+    assert.equal(info.balanceText, '$12.34')
+    assert.deepEqual(calls, [`GET ${USER_URL}`])
+  })
+
+  await test('个人信息凭据失败不回显 token', async () => {
+    for (const response of [{ status: 401 }, { status: 403 }, { body: { code: 'INVALID_TOKEN', message: TOKEN } }]) {
+      reset({ body: statusBody(true) }, null, response)
+      const info = await adapter.userInfo(ACCOUNT)
+      assert.equal(info.ok, false)
+      assert.match(info.msg, /重新登录.*更新 Auth token/)
+      assert.ok(!info.msg.includes(TOKEN))
+      assert.deepEqual(calls, [`GET ${USER_URL}`])
+    }
+  })
+
+  await test('未知余额不能伪造零，业务失败/网络错误不暴露回显', async () => {
+    const bad = [
+      ...[null, '', false, 'NaN', 'Infinity'].map(balance => ({ body: userBody(balance) })),
+      { body: { code: 0, data: { id: 7 } } },
+      { body: { code: 1, message: TOKEN } }, { status: 500 },
+      () => { throw new Error('test balance network unavailable') }
+    ]
+    for (const response of bad) {
+      reset({ body: statusBody(true) }, null, response)
+      const info = await adapter.userInfo(ACCOUNT)
+      assert.equal(info.ok, false)
+      assert.equal(info.balanceText, undefined)
+      assert.ok(!info.msg.includes(TOKEN))
+      assert.equal(postCalls(), 0)
+    }
+  })
+
+  await test('查询入口与列表刷新更新余额，均只读个人信息', async () => {
+    const account = { ...ACCOUNT, lastBalance: '-' }
+    reset({ body: statusBody(true) })
+    const rows = await queryEntry({ accounts: [account] })
+    assert.equal(rows[0].balance, '$12.34')
+    assert.equal(account.lastBalance, '$12.34')
+    assert.deepEqual(calls, [`GET ${USER_URL}`])
+    reset({ body: statusBody(true) }, null, { body: userBody('9.87') })
+    await refreshBalances({ accounts: [account] })
+    assert.equal(account.lastBalance, '$9.87')
+    assert.deepEqual(calls, [`GET ${USER_URL}`])
+  })
+
+  await test('余额接口失败保留列表缓存且不影响已签保护', async () => {
+    const account = { ...ACCOUNT, lastBalance: '$9.87' }
+    reset({ body: statusBody(true) }, null, { status: 500 })
+    await refreshBalances({ accounts: [account] })
+    assert.equal(account.lastBalance, '$9.87')
+    const result = await checkinAccount(account)
+    assert.equal(result.status, 'already')
+    assert.equal(result.award, '今日 +$5.00')
+    assert.equal(account.lastBalance, '$9.87')
+    assert.equal(postCalls(), 0)
+  })
+
+  assert.ok(logs.every(line => !line.includes(TOKEN)))
   console.log(`\napikey.casa ${passed} 组隔离回归全部通过（无真实请求）`)
 } catch (err) {
   failed = true

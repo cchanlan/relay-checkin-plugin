@@ -1,6 +1,7 @@
 import { request } from './common.js'
 
 const CHECKIN_PATH = '/api/v1/redeem/checkin'
+const USER_INFO_PATH = '/api/v1/auth/me'
 const AUTH_HINT = 'Auth token 无效或已过期，请重新登录 apikey.casa 后更新 Auth token'
 const UNCERTAIN_HINT = '签到结果未确认，请刷新站点页面确认状态；不要连续重试'
 
@@ -14,10 +15,15 @@ function authFailed(res) {
     || ['INVALID_TOKEN', 'UNAUTHORIZED', 'FORBIDDEN', 'TOKEN_EXPIRED'].includes(code)
 }
 
-function rewardAmount(value) {
+function moneyAmount(value) {
   if (!['number', 'string'].includes(typeof value) || String(value).trim() === '') return null
   const amount = Number(value)
-  return Number.isFinite(amount) && amount >= 0 ? amount : null
+  return Number.isFinite(amount) ? amount : null
+}
+
+function rewardAmount(value) {
+  const amount = moneyAmount(value)
+  return amount != null && amount >= 0 ? amount : null
 }
 
 function rewardText(amount) {
@@ -59,18 +65,32 @@ export default {
   },
 
   async userInfo(account) {
-    // 此站不是 new-api；用只读签到状态验证 Auth token，不猜测余额或用户 ID。
-    const status = await this.getCheckinStatus(account)
-    if (!status.ok) return { ok: false, msg: status.msg }
+    // 个人信息接口提供真实美元余额；余额查询不依赖签到接口，也不触发签到。
+    let res
+    try {
+      const base = String(account.baseUrl || '').replace(/\/+$/, '')
+      res = await request(`${base}${USER_INFO_PATH}`, { headers: this.buildHeaders(account) })
+    } catch {
+      return { ok: false, msg: '无法查询 apikey.casa 余额，请稍后重试' }
+    }
+    if (authFailed(res)) return { ok: false, msg: AUTH_HINT }
+    if (res.status < 200 || res.status >= 300 || res.json?.code !== 0) {
+      return { ok: false, msg: `余额查询失败（HTTP ${res.status}），请稍后重试` }
+    }
+    const data = res.json.data
+    const balance = moneyAmount(data?.balance)
+    if (balance == null) return { ok: false, msg: '站点余额返回异常，请稍后重试' }
+    const id = moneyAmount(data?.id)
     return {
       ok: true,
-      username: '',
-      siteUserId: null,
+      username: typeof data.username === 'string' ? data.username : '',
+      siteUserId: Number.isSafeInteger(id) && id > 0 ? id : null,
       quota: null,
       usedQuota: null,
-      balanceText: '-',
+      // balance 本身就是美元；不转换 quota、不叠加奖励、不猜测冻结或已用金额。
+      balanceText: `$${balance.toFixed(2)}`,
       usedText: '-',
-      checkedIn: status.checked
+      checkedIn: null
     }
   },
 
