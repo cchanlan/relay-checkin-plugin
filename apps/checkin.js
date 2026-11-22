@@ -1,7 +1,7 @@
 import { getConfig } from '../models/config.js'
 import { matchSkipHost } from '../models/checkin-policy.js'
 import { touchEntry, upsertAccount, removeAccount, setAuto, setAccountAuto, accountLabel, persist, setPushGroup, rememberGroup } from '../models/store.js'
-import { probeAccount, probeSessionAccount, probeSub2apiSite, normalizeBaseUrl, getAdapter, cookieTypeForHost, preferredBindingForHost, isMintHost } from '../models/adapters/index.js'
+import { probeAccount, probeSessionAccount, probeSub2apiSite, normalizeBaseUrl, getAdapter, cookieTypeForHost, preferredBindingForHost, isMintHost, isApikeyCasaSite, bindingRestrictionForSite } from '../models/adapters/index.js'
 import { checkinEntry, checkinAccountResults, combineCheckinResults, queryEntry, refreshBalances } from '../models/executor.js'
 import { withUserLock } from '../models/lock.js'
 import { renderResult, renderList, renderHelp, formatResultRows } from '../models/render.js'
@@ -391,6 +391,8 @@ export class RelayCheckinCore {
         token,
         loginEmail: null,
         password: null,
+        // 用Auth token修正旧邮箱误绑时，不能保留旧登录流程的access/refresh缓存。
+        ...(isApikeyCasaSite(site) ? { accessToken: null, tokenExpiresAt: null } : {}),
         siteUserId: siteUserId || probe.info.siteUserId || null,
         signPath: null,
         auto: true
@@ -403,6 +405,8 @@ export class RelayCheckinCore {
    * @returns {Promise<{ok, msg?, account?, info?}>}
    */
   async verifyCookie(site, rawSession, siteUserId) {
+    const restriction = bindingRestrictionForSite(site, 'cookie')
+    if (restriction) return { ok: false, msg: restriction }
     // 薄荷的 cookie 名是 auth_token，用户可能连 "auth_token=" 一起贴进来；其余站点贴的是 session
     const isMint = isMintHost(site.host)
     const token = extractCookieValue(rawSession, isMint ? 'auth_token' : 'session')
@@ -480,6 +484,8 @@ export class RelayCheckinCore {
    * 完全不同（session cookie vs JWT），因此按站点类型分流。
    */
   async verifyEmail(site, loginEmail, password) {
+    const restriction = bindingRestrictionForSite(site, 'email')
+    if (restriction) return { ok: false, msg: restriction }
     if (cookieTypeForHost(site.host) !== 'agentrouter') {
       const probe = await guardHang(probeSub2apiSite(site.baseUrl), '识别站点类型')
       if (probe.ok) return await this.verifySub2apiEmail(site, loginEmail, password, probe)
@@ -493,6 +499,8 @@ export class RelayCheckinCore {
    * 由 saveAccount 的常规首签流程去签。
    */
   async verifySub2apiEmail(site, loginEmail, password, probe) {
+    const restriction = bindingRestrictionForSite(site, 'email')
+    if (restriction) return { ok: false, msg: restriction }
     const normalizedEmail = String(loginEmail || '').trim()
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
       return { ok: false, msg: '邮箱格式不正确' }
@@ -545,6 +553,8 @@ export class RelayCheckinCore {
    * 否则用户会以为绑上了、实际下一轮就 401。
    */
   async verifySub2apiRefresh(site, refreshToken, probe) {
+    const restriction = bindingRestrictionForSite(site, 'refresh')
+    if (restriction) return { ok: false, msg: restriction }
     const token = String(refreshToken || '').trim()
     if (!token) return { ok: false, msg: '刷新令牌不能为空' }
 
@@ -587,6 +597,8 @@ export class RelayCheckinCore {
    * 保存账号时直接复用，避免第二次登录覆盖“本次到账”状态。
    */
   async verifyAgentRouterEmail(site, loginEmail, password) {
+    const restriction = bindingRestrictionForSite(site, 'email')
+    if (restriction) return { ok: false, msg: restriction }
     const normalizedEmail = String(loginEmail || '').trim()
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
       return { ok: false, msg: '邮箱格式不正确' }
@@ -618,15 +630,29 @@ export class RelayCheckinCore {
     }
   }
 
+  /** 在任何登录/入库前拒绝不支持的凭据入口，并取消旧会话。 */
+  async rejectUnsupportedBinding(kind, site, hasCredentials = false) {
+    const restriction = bindingRestrictionForSite(site, kind)
+    if (!restriction) return false
+    if (hasCredentials) await this.recallIfGroup()
+    const stale = clearPending(String(this.e.user_id))
+    if (stale) await recallBindPrompt(stale)
+    await this.reply(restriction)
+    return true
+  }
+
   /**
    * 发起绑定会话：记录站点，等用户私聊补发凭据；超时自动取消并回执。
    * 机器人开启 disablePrivate 时：disableAdopt 放行了「中转绑定」则引导用户用
    * 「中转绑定 凭据」格式私聊发送，否则提示替代方案且不登记会话
    */
   async startBind(kind, site) {
+    if (await this.rejectUnsupportedBinding(kind, site)) return
     // 薄荷没有站点用户ID，提示文案与 AnyRouter 不同（只贴一个 auth_token）
     const mintBind = kind === 'cookie' && isMintHost(site.host)
-    const fullCmd = mintBind
+    const fullCmd = isApikeyCasaSite(site)
+      ? '#中转添加 https://apikey.casa AuthToken值'
+      : mintBind
       ? `#中转添加cookie ${site.host} auth_token值`
       : {
         cookie: `#中转添加cookie ${site.host} session值 用户ID`,
@@ -674,7 +700,9 @@ export class RelayCheckinCore {
     armBindTimeout(pending, timeoutSec)
     pendingBinds.set(key, pending)
 
-    const need = {
+    const need = isApikeyCasaSite(site)
+      ? 'Auth token（浏览器登录后按 F12 → Network，打开 /api/v1/redeem/checkin 请求，复制 Authorization 的 Bearer 后面的值；不是 API Key，不要带 Bearer 前缀）'
+      : {
       cookie: isMintHost(site.host)
         ? 'auth_token值（在浏览器登录该站点后按 F12，在 Application → Cookies 里复制 auth_token 的值）'
         : 'session值 用户ID（空格分隔；整串 Cookie 可整段粘贴）',
@@ -721,7 +749,7 @@ export class RelayCheckinCore {
 
     // Sub2API 站点域名任意，只能问一次公开配置接口。它没有 new-api 的令牌体系，
     // 直接走令牌绑定只会得到「令牌验证失败」这种看不懂的报错，先引导到邮箱绑定。
-    if (site) {
+    if (site && !isApikeyCasaSite(site)) {
       const probe = await probeSub2apiSite(site.baseUrl).catch(() => ({ ok: false }))
       if (probe.ok) {
         if (args.length > 1) await this.recallIfGroup()
@@ -773,6 +801,7 @@ export class RelayCheckinCore {
   async addCookie() {
     const args = String(this.e.msg).trim().split(/\s+/).slice(1)
     const site = this.parseSite(args[0])
+    if (await this.rejectUnsupportedBinding('cookie', site, args.length > 1)) return true
 
     const agentRouterHint = agentRouterCookieHint(site)
     if (agentRouterHint) {
@@ -848,6 +877,7 @@ export class RelayCheckinCore {
   async addEmail() {
     const args = String(this.e.msg).trim().split(/\s+/).slice(1)
     const site = this.parseSite(args[0])
+    if (await this.rejectUnsupportedBinding('email', site, args.length > 1)) return true
 
     if (args.length === 1) {
       if (!site) {
@@ -898,6 +928,7 @@ export class RelayCheckinCore {
   async addRefresh() {
     const args = rawText(this.e).replace(/^[#＃]中转(?:站)?添加刷新令牌\s*/, '').split(/\s+/).filter(Boolean)
     const site = this.parseSite(args[0])
+    if (await this.rejectUnsupportedBinding('refresh', site, args.length > 1)) return true
 
     if (args.length === 1) {
       if (!site) {
@@ -981,6 +1012,7 @@ export class RelayCheckinCore {
       return false
     }
     // 薄荷没有站点用户ID，只发一个 auth_token 就够
+    if (await this.rejectUnsupportedBinding(pending.kind, pending)) return true
     const mintBind = pending.kind === 'cookie' && isMintHost(pending.host)
     // 整串 Cookie 带空格时会被拆成多段：薄荷要整段拼回去，其余站点最后一段仍是用户ID
     let cookieInput = null

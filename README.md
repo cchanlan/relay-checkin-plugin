@@ -145,7 +145,11 @@ NG 侧另有面板配置与 `ctx.cron` 定时（改 cron 立即生效），出�
 
 ## apikey.casa
 
-使用登录后的 **Auth token**，不是用于模型调用的 API Key，也不需要邮箱密码绑定：
+**仅支持登录后的 Auth token**，不接受 API Key、邮箱密码、Cookie 或刷新令牌。
+`#中转添加邮箱`、`#中转添加cookie`、`#中转添加刷新令牌` 用于此站时会在登录和入库之前直接拒绝；
+正确的 Auth token 添加不会再被误引导到 Sub2API 邮箱登录。
+
+绑定步骤：
 
 1. 在浏览器登录 [apikey.casa](https://apikey.casa)，按 F12 → Network，刷新每日签到页面，
    打开 `/api/v1/redeem/checkin` 请求，在 Request Headers 的 `Authorization` 中复制
@@ -159,6 +163,9 @@ NG 侧另有面板配置与 `ctx.cron` 定时（改 cron 立即生效），出�
 Auth token 过期后请重新登录获取新值，再用相同添加指令更新凭据；新绑定账号会记录站点用户 ID，
 后续重绑会更新原账号。若早期账号没有站点用户 ID，先用 `#中转列表` 找到序号，
 再 `#中转删除 序号` 后重新添加，避免重复。余额查询失败时保留列表已有缓存，不把未知余额显示为零。
+旧版本如果把此站绑成 Sub2API/邮箱账号，会提示需要 Auth token 重绑，不再调用错误签到接口或自动登录。
+先在浏览器取 Auth token，再用 `#中转添加 https://apikey.casa AuthToken值` 更新；原账号有站点用户 ID
+时直接覆盖原条目，缺 ID 时按上面的删除重绑步骤处理。
 请只在自己的插件配置或私聊绑定时提供凭据，不要贴进源码、公开文档或问题反馈。
 
 ## 薄荷公益站

@@ -11,7 +11,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const DATA = path.join(ROOT, 'data')
 if (fs.existsSync(DATA)) throw new Error('请在不含 data/ 的独立插件副本运行，不能使用在线插件目录')
 
-const TOKEN = 'FAKE_AUTH_TOKEN_FOR_TEST_ONLY'
+const TOKEN = 'FAKE_HEADER.FAKE_PAYLOAD.FAKE_SIGNATURE'
 const URL = 'https://apikey.casa/api/v1/redeem/checkin'
 const USER_URL = 'https://apikey.casa/api/v1/auth/me'
 const ACCOUNT = { name: 'apikey.casa', baseUrl: 'https://apikey.casa', type: 'apikeycasa', token: TOKEN }
@@ -64,7 +64,7 @@ try {
     for (const host of ['apikey.casa', 'APIKEY.CASA', 'apikey.casa.']) assert.equal(isApikeyCasaHost(host), true)
     for (const host of ['', null, 'apikey.casa.evil.test', 'evil-apikey.casa', 'sub.apikey.casa']) assert.equal(isApikeyCasaHost(host), false)
     assert.equal(adapter.type, 'apikeycasa')
-    assert.equal(preferredBindingForHost('apikey.casa'), null)
+    assert.equal(preferredBindingForHost('apikey.casa'), 'token')
   })
 
   await test('账号探测只读个人信息接口与 Bearer 鉴权', async () => {

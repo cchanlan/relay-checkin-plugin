@@ -1,4 +1,5 @@
 import { request } from './common.js'
+import { APIKEY_CASA_AUTH_HINT, isApikeyCasaAuthToken } from '../apikeycasa-policy.js'
 
 const CHECKIN_PATH = '/api/v1/redeem/checkin'
 const USER_INFO_PATH = '/api/v1/auth/me'
@@ -65,6 +66,9 @@ export default {
   },
 
   async userInfo(account) {
+    if ((account.authMode && account.authMode !== 'token') || !isApikeyCasaAuthToken(account.token)) {
+      return { ok: false, msg: APIKEY_CASA_AUTH_HINT }
+    }
     // 个人信息接口提供真实美元余额；余额查询不依赖签到接口，也不触发签到。
     let res
     try {
@@ -95,6 +99,9 @@ export default {
   },
 
   async getCheckinStatus(account) {
+    if ((account.authMode && account.authMode !== 'token') || !isApikeyCasaAuthToken(account.token)) {
+      return { supported: true, ok: false, msg: APIKEY_CASA_AUTH_HINT }
+    }
     try {
       return parseStatus(await request(checkinUrl(account), { headers: this.buildHeaders(account) }))
     } catch {

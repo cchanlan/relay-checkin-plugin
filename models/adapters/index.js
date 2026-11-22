@@ -8,16 +8,29 @@ import mint from './mint.js'
 import apikeycasa from './apikeycasa.js'
 import { request } from './common.js'
 import { normalizeAndValidateBaseUrl } from '../url-security.js'
+import { isApikeyCasaHost, isApikeyCasaSite, APIKEY_CASA_AUTH_HINT } from '../apikeycasa-policy.js'
+export { isApikeyCasaHost, isApikeyCasaSite, bindingRestrictionForSite, APIKEY_CASA_AUTH_HINT } from '../apikeycasa-policy.js'
 
 const adapters = { newapi, veloera, generic, agentrouter, anyrouter, sub2api, mint, apikeycasa }
 
-/** 仅识别官方主机，不能误匹配 apikey.casa.evil.test 等域名。 */
-export function isApikeyCasaHost(host) {
-  return String(host || '').toLowerCase().replace(/\.$/, '') === 'apikey.casa'
-}
-
 export function getAdapter(type) {
   return adapters[type] || newapi
+}
+
+const restrictedApikeyCasa = {
+  type: 'apikeycasa',
+  async userInfo() { return { ok: false, msg: APIKEY_CASA_AUTH_HINT } },
+  async getCheckinStatus() { return { supported: true, ok: false, msg: APIKEY_CASA_AUTH_HINT } },
+  async checkin() { return { ok: false, already: false, msg: APIKEY_CASA_AUTH_HINT } }
+}
+
+/** 旧错误类型不能继续邮箱登录/续期或探测通用签到；保留条目，明确要求重绑。 */
+export function getAccountAdapter(account) {
+  if (isApikeyCasaSite(account)) {
+    return account.type === 'apikeycasa' && (!account.authMode || account.authMode === 'token')
+      ? apikeycasa : restrictedApikeyCasa
+  }
+  return getAdapter(account.type)
 }
 
 /**
@@ -43,9 +56,10 @@ export function isMintHost(host) {
 /**
  * 需要专用凭据流程的站点：令牌入口不能正确完成 AnyRouter/AgentRouter 绑定。
  * 薄荷没有令牌与邮箱密码登录，只认 auth_token cookie，走令牌入口必然失败；
- * 普通 new-api/Veloera 站点返回 null，继续走令牌自动探测。
+ * apikey.casa 只接受 token；普通 new-api/Veloera 返回 null，继续自动探测。
  */
 export function preferredBindingForHost(host) {
+  if (isApikeyCasaSite({ host })) return 'token'
   const type = cookieTypeForHost(host)
   if (type === 'anyrouter') return 'cookie'
   if (type === 'agentrouter') return 'email'
@@ -67,6 +81,7 @@ export function normalizeBaseUrl(input) {
  * @returns {Promise<{ok: boolean, siteName?: string, turnstileEnabled?: boolean}>}
  */
 export async function probeSub2apiSite(baseUrl) {
+  if (isApikeyCasaSite({ baseUrl })) return { ok: false }
   try {
     const res = await request(`${baseUrl}/api/v1/settings/public`)
     const data = res.json?.data
@@ -90,6 +105,7 @@ export async function probeSub2apiSite(baseUrl) {
  * 签到接口要求网页会话的魔改站）。能则返回 newapi 会话账号探测结果。
  */
 export async function probeSessionAccount(baseUrl, session, siteUserId) {
+  if (isApikeyCasaSite({ baseUrl })) return { ok: false, msg: APIKEY_CASA_AUTH_HINT }
   const account = { baseUrl, token: session, siteUserId, authMode: 'session' }
   try {
     const info = await newapi.userInfo(account)

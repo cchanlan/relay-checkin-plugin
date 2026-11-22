@@ -1,5 +1,5 @@
 import { matchSkipHost } from './checkin-policy.js'
-import { getAdapter } from './adapters/index.js'
+import { getAccountAdapter } from './adapters/index.js'
 import { quotaToUsd, request, parseCheckinResult, classifyValidation, deriveAwardQuota, proxySetupHint, hostOf } from './adapters/common.js'
 import { powCheckin, turnstileCheckin } from './browser.js'
 import { ocrCaptcha } from './ocr.js'
@@ -244,7 +244,7 @@ async function readUserInfo(adapter, account, options) {
  * @returns {Promise<{name, status, statusText, award, balance, msg}>}
  */
 export async function checkinAccount(account) {
-  const adapter = getAdapter(account.type)
+  const adapter = getAccountAdapter(account)
   // 跳过签到和抽奖，但仍查询余额；不为查询启动浏览器过验证。
   if (matchSkipHost(account.name, getConfig().skip?.hosts)) {
     logger.info(`[relay-checkin-plugin] ${account.name} 命中跳过清单，仅查询余额`)
@@ -522,7 +522,7 @@ export async function checkinAccountResults(account, { initialCheckin = null, in
     ? finalizeCheckinResult(account, initialCheckin, { afterInfo: info })
     : await checkinAccount(account)
   const rows = [row]
-  const adapter = getAdapter(account.type)
+  const adapter = getAccountAdapter(account)
   if (skipped || matchSkipHost(account.name, getConfig().skip?.hosts) || adapter.type !== 'newapi') return rows
 
   let lottery
@@ -622,7 +622,7 @@ const BROWSER_TYPES = new Set(['anyrouter'])
 export async function refreshBalances(entry, { timeoutMs = 10000 } = {}) {
   await Promise.allSettled(entry.accounts.map(async account => {
     if (BROWSER_TYPES.has(account.type)) return
-    const adapter = getAdapter(account.type)
+    const adapter = getAccountAdapter(account)
     let timer = null
     try {
       // 超时后原 promise 仍会被本 race 接管（不会变成未处理拒绝），同时清掉定时器避免悬挂
@@ -650,7 +650,7 @@ export async function refreshBalances(entry, { timeoutMs = 10000 } = {}) {
 export async function queryEntry(entry) {
   const results = []
   for (const account of entry.accounts) {
-    const adapter = getAdapter(account.type)
+    const adapter = getAccountAdapter(account)
     const row = { name: accountLabel(account), status: 'ok', statusText: '正常', award: '', balance: '-', msg: '' }
     try {
       const info = await adapter.userInfo(account)
