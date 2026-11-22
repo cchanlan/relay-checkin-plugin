@@ -176,10 +176,11 @@ function logNonJsonResponse(method, targetUrl, response) {
  * @param {object} opts { method, headers, body: JSON 对象或字符串,
  *                        timeoutMs: 覆盖配置超时, maxRetry: 覆盖配置重试次数,
  *                        retryStatuses: 命中这些状态码时重试（明确否定才重发）,
- *                        retryDelayMs: 重试前等待毫秒数 }
+ *                        retryDelayMs: 重试前等待毫秒数,
+ *                        retryBeforeSend: false 禁止非幂等请求的握手阶段重试 }
  * @returns {Promise<{status: number, json: object|null, setCookies: string[]}>}
  */
-export async function request(url, { method = 'GET', headers = {}, body = null, timeoutMs = null, maxRetry = null, retryStatuses = null, retryDelayMs = 0 } = {}) {
+export async function request(url, { method = 'GET', headers = {}, body = null, timeoutMs = null, maxRetry = null, retryStatuses = null, retryDelayMs = 0, retryBeforeSend = true } = {}) {
   const cfg = getConfig()
   const tMs = timeoutMs ?? (cfg.request.timeout || 15) * 1000
   const normalizedMethod = String(method || 'GET').toUpperCase()
@@ -188,7 +189,7 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
   const retries = idempotent ? (maxRetry ?? (cfg.request.retry ?? 2)) : 0
   // 例外：连接在「请求发出前」就失败（TLS 握手被拒、代理都连不上）时服务端必然没收到，
   // 即便非幂等也能安全重发。边缘节点偶发的 SSL alert 40 就属于这一类。
-  const preRequestRetries = idempotent ? 0 : 2
+  const preRequestRetries = idempotent || retryBeforeSend === false ? 0 : 2
   // 收到「明确否定」的状态码（网关 502/503/504 等）时可以重试：此时服务端一定没有
   // 成功，重发不存在「可能已生效」的风险。只有调用方显式传 retryStatuses 才启用，
   // 重试次数取显式 maxRetry（非幂等请求不会因此被默认重发）。

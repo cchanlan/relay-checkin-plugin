@@ -360,7 +360,8 @@ export async function checkinAccount(account) {
         : await readCheckinStatus(adapter, account)
       if (afterStatus?.ok && afterStatus.checked) {
         const changedThisRun = beforeStatus?.ok && beforeStatus.checked === false
-        if (!r.ok || r.already) {
+        if (!r.ok || r.already || r.confirmed === false) {
+          // 未确认的提交被状态接口证实成功后，也要清掉旧的“未确认”批注。
           // 前面报过错却复核到已签，必须留一行：否则日志里只剩那条过码失败的 warn，
           // 而出图写着「状态复核成功」，排查的人会以为两边有一个在骗自己。
           if (!r.ok) {

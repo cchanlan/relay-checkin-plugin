@@ -90,6 +90,17 @@ try {
 assert.equal(alertProxy.state.connects, 3, 'POST 应在握手失败后重试 2 次（共 3 次连接）')
 assert.match(String(err?.message || ''), /TLS 握手阶段拒绝/, '应向用户说明是握手阶段被拒')
 
+// 显式关闭握手重试：apikey.casa 领取 POST 在任何传输路径都只发起一次。
+alertProxy.state.connects = 0
+err = null
+try {
+  await request('https://example.com/api/v1/redeem/checkin', { method: 'POST', maxRetry: 0, retryBeforeSend: false })
+} catch (e) {
+  err = e
+}
+assert.equal(alertProxy.state.connects, 1, '显式禁用时 POST 不应重试代理握手')
+assert.match(String(err?.message || ''), /TLS 握手阶段拒绝/)
+
 // 2) GET 在 retry=0 下拿到 0 预算 → 只连 1 次
 alertProxy.state.connects = 0
 err = null
@@ -120,6 +131,6 @@ assert.ok(elapsed < 3000, `超时应在 ~800ms 内结束，实际 ${elapsed}ms`)
 
 alertProxy.server.close()
 hangProxy.server.close()
-console.log('代理重试行为 OK（握手失败重试 / GET 不重试 / 挂起超时兜底）')
+console.log('代理重试行为 OK（默认握手重试 / 显式禁用重试 / GET 不重试 / 挂起超时兜底）')
 // 宿主装了配置监听器，事件循环不会自己空，测试跑完直接退出
 process.exit(0)

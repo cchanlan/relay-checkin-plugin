@@ -2,7 +2,7 @@
 
 中转站自动签到插件。手动签到 / 每日定时 / 余额查询，结果出图，数据按用户隔离，群内所有人可用。
 
-支持 **new-api、Veloera 及同源魔改站、AnyRouter、AgentRouter、Sub2API、薄荷公益站**，站点类型自动识别。
+支持 **new-api、Veloera 及同源魔改站、AnyRouter、AgentRouter、Sub2API、apikey.casa、薄荷公益站**，站点类型自动识别。
 宿主支持 **TRSS-Yunzai**（OneBot v11）与 **[Yunzai NG](https://github.com/Yunzai-NG/yunzai-ng)**。
 
 > **本仓库基于 [Cat-bl/relay-checkin-plugin](https://github.com/Cat-bl/relay-checkin-plugin) 改造，独立维护、不同步上游**；
@@ -13,6 +13,7 @@
 - 同一份代码兼容 Yunzai NG（宿主依赖收进 `host/` 适配层）
 - 新增 **Sub2API** 站点与 `#中转添加刷新令牌`：邮箱密码或 refresh_token 绑定，续期不开浏览器
 - **ChatflowsAI**（ai.chatflowsai.com）：支持每日签到，自动签到独立安排在每天北京时间 **12:10 后**，其他站点保持原定时；午后重启可补签。手动 `#中转签到` 可领取站点当前周期奖励。
+- **apikey.casa**：使用 Auth token 绑定，每日签到与已签状态查询；奖励直接按美元显示，已签到不重复领取。
 - **UltraRouter**（ultrarouter.org）：支持每日签到、今日奖励与已签状态查询；已绑定账号无需重新添加。
 - 新增 **薄荷公益站**（up.x666.me）：`#中转添加cookie 地址 auth_token值` 绑定，签到即转盘抽奖，奖励按「次」展示
 - **Turnstile 改为断开调试连接后由页面自治过码**（CDP 连着必被判自动化），三个平台都能自动勾选：
@@ -108,6 +109,7 @@ NG 侧另有面板配置与 `ctx.cron` 定时（改 cron 立即生效），出�
 
 ```
 #中转添加 站点地址 [令牌]        令牌绑定，群里可只发地址、私聊补令牌
+#中转添加 https://apikey.casa <Auth token>   apikey.casa（把占位符换成自己的 Auth token）
 #中转添加cookie 站点地址 session  只认网页会话的魔改站
 #中转添加cookie 站点地址 auth_token值   薄荷公益站（up.x666.me），签到带转盘抽奖
 #中转添加邮箱 站点地址 邮箱 密码   AgentRouter / Sub2API
@@ -140,6 +142,24 @@ NG 侧另有面板配置与 `ctx.cron` 定时（改 cron 立即生效），出�
 - 领取POST始终单次；响应丢失时只复查状态，无法确认则显示“抽奖未确认”。
 - 没有福利接口的站点保持原展示，探测结果缓存6小时；临时网络错误不会永久禁用探测。
 - 如果同时配置了跳过清单，命中的账号不执行每日抽奖；余额查询、账号列表不会触发抽奖。
+
+## apikey.casa
+
+使用登录后的 **Auth token**，不是用于模型调用的 API Key，也不需要邮箱密码绑定：
+
+1. 在浏览器登录 [apikey.casa](https://apikey.casa)，按 F12 → Network，刷新每日签到页面，
+   打开 `/api/v1/redeem/checkin` 请求，在 Request Headers 的 `Authorization` 中复制
+   **`Bearer ` 后面的值**，不要带 `Bearer ` 前缀。
+2. 私聊发送 `#中转添加 https://apikey.casa <Auth token>`，把占位符替换成自己的值；
+   也可先发送 `#中转添加 https://apikey.casa`，再按提示私聊补发 Auth token。
+   添加成功会立即尝试签到，之后沿用已有的手动签到和每日定时。
+
+按北京时间每天可签到一次。奖励按站点金额直接显示美元；签到状态接口不返回余额，因此余额显示 `-`，
+不会拿奖励冒充余额。今日已签到不再提交；奖励为 0 或状态查询失败时不领取。
+签到请求不自动重发，响应丢失只复查状态，不能确认时显示“签到未确认”。
+Auth token 过期后请重新登录获取新值；如原账号未填写站点用户 ID，先用 `#中转列表` 找到序号，
+再 `#中转删除 序号` 后重新添加，避免新 token 被当成另一个账号。
+请只在自己的插件配置或私聊绑定时提供凭据，不要贴进源码、公开文档或问题反馈。
 
 ## 薄荷公益站
 

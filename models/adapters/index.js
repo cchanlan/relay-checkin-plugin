@@ -5,10 +5,16 @@ import agentrouter from './agentrouter.js'
 import anyrouter from './anyrouter.js'
 import sub2api from './sub2api.js'
 import mint from './mint.js'
+import apikeycasa from './apikeycasa.js'
 import { request } from './common.js'
 import { normalizeAndValidateBaseUrl } from '../url-security.js'
 
-const adapters = { newapi, veloera, generic, agentrouter, anyrouter, sub2api, mint }
+const adapters = { newapi, veloera, generic, agentrouter, anyrouter, sub2api, mint, apikeycasa }
+
+/** 仅识别官方主机，不能误匹配 apikey.casa.evil.test 等域名。 */
+export function isApikeyCasaHost(host) {
+  return String(host || '').toLowerCase().replace(/\.$/, '') === 'apikey.casa'
+}
 
 export function getAdapter(type) {
   return adapters[type] || newapi
@@ -96,10 +102,17 @@ export async function probeSessionAccount(baseUrl, session, siteUserId) {
 
 /**
  * 自动探测站点类型（令牌方式添加时用）
- * 依次尝试 new-api（Bearer）、Veloera（原始令牌 + Veloera-User）
+ * apikey.casa 用独立 Auth token 验证；其他站点依次尝试 new-api、Veloera。
  * @returns {Promise<{ok: boolean, type?: string, info?: object, msg?: string}>}
  */
 export async function probeAccount(baseUrl, token, siteUserId) {
+  let host
+  try { host = new URL(baseUrl).hostname } catch { host = '' }
+  if (isApikeyCasaHost(host)) {
+    const info = await apikeycasa.userInfo({ baseUrl, token, siteUserId })
+    return info.ok ? { ok: true, type: 'apikeycasa', info } : { ok: false, msg: info.msg }
+  }
+
   // 1) new-api：Bearer 令牌
   try {
     const info = await newapi.userInfo({ baseUrl, token, siteUserId })
