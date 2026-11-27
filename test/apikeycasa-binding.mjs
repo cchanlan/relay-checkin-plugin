@@ -160,7 +160,7 @@ try {
       assert.equal(r.ok, false); assertHint(r.msg)
       assert.deepEqual(calls, [])
     }
-    for (const value of ['sk_FAKE_KEY', 'fake@example.test FAKE_PASSWORD']) {
+    for (const value of ['sk_FAKE_KEY']) {
       reset(); setMessage(c, `#中转添加 ${SITE.baseUrl} ${value}`)
       await c.core.add()
       assertHint(c.replies.at(-1))
@@ -197,10 +197,10 @@ try {
     }
   })
 
-  await test('只发地址提示Auth token取法，私聊补发正确token可以绑定', async () => {
+  await test('显式开启手动token会话仍可补发token绑定', async () => {
     reset(); validRoutes()
     const c = createCore(`#中转添加 ${SITE.baseUrl}`)
-    await c.core.add()
+    await c.core.startBind('token', SITE)
     assert.match(c.replies.at(-1), /Auth token.*F12.*Network.*Bearer/)
     assert.ok(!c.replies.at(-1).includes('Veloera'))
     assert.deepEqual(calls, [])

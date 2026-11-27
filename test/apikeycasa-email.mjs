@@ -215,6 +215,40 @@ try {
     await c.c.bindCredentials()
     assert.equal(getEntry(c.e)?.accounts[0]?.authMode, 'email')
   })
+  await test('普通添加只发地址默认邮箱会话，两种前缀及群私聊均可补发登录', async () => {
+    for (const prefix of ['#中转', '#中转站']) for (const group of [true, false]) {
+      defaults()
+      const c = core(prefix + '添加 https://apikey.casa', group)
+      await c.c.add()
+      const prompt = c.replies.join('\n')
+      assert.match(prompt, /邮箱 登录密码/)
+      assert.match(prompt, /无需填写站点用户ID/)
+      assert.ok(!/Auth token|F12|Bearer|访问令牌/.test(prompt))
+      assert.deepEqual(calls, [])
+      c.e.isGroup = false
+      c.e.msg = c.e.raw_message = 'fake@example.test ' + PASSWORD
+      await c.c.bindCredentials()
+      const a = getEntry(c.e)?.accounts[0]
+      assert.ok(a, c.replies.join('\n'))
+      assert.equal(a.type, 'apikeycasa'); assert.equal(a.authMode, 'email'); assert.equal(a.siteUserId, 7)
+      assert.equal(calls.filter(x => x === 'POST /auth/login').length, 1)
+    }
+  })
+  await test('普通添加完整邮箱密码同样登录，无需用户ID', async () => {
+    for (const prefix of ['#中转', '#中转站']) for (const group of [true, false]) {
+      defaults()
+      const c = core(prefix + '添加 apikey.casa fake@example.test ' + PASSWORD, group)
+      await c.c.add()
+      assert.equal(getEntry(c.e)?.accounts[0]?.authMode, 'email', c.replies.join('\n'))
+      assert.equal(c.recalls.length, group ? 1 : 0)
+    }
+  })
+  await test('普通添加邮箱缺少密码时提示补齐邮箱格式', async () => {
+    const c = core('#中转添加 apikey.casa fake@example.test', true)
+    await c.c.add()
+    assert.match(c.replies.join('\n'), /邮箱 站内密码/)
+    assert.equal(getEntry(c.e), null); assert.deepEqual(calls, []); assert.equal(c.recalls.length, 1)
+  })
   await test('底层邮箱入口均走专用适配器', async () => {
     const c = core()
     for (const method of ['verifyEmail','verifySub2apiEmail','verifyAgentRouterEmail']) {

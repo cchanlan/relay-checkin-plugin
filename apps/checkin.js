@@ -259,7 +259,7 @@ async function getPrivateBlock(e) {
  */
 export const COMMAND_RULES = [
   { reg: '^#中转(?:站)?(帮助|help)$', fnc: 'help', desc: '中转站签到帮助图' },
-  { reg: '^#中转(?:站)?添加邮箱\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addEmail', desc: '邮箱登录绑定（AgentRouter / Sub2API）' },
+  { reg: '^#中转(?:站)?添加邮箱\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addEmail', desc: '邮箱登录绑定（AgentRouter / Sub2API / apikey.casa）' },
   // 与「添加」规则互不冲突（那条要求 添加 后紧跟空格），仍与同族指令排在一起便于维护
   { reg: '^#中转(?:站)?添加刷新令牌\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addRefresh', desc: '刷新令牌绑定（Sub2API）' },
   { reg: '^#中转(?:站)?添加[cC]ookie\\s+\\S+(?:\\s+\\S+)*$', fnc: 'addCookie', desc: 'Cookie 绑定（AnyRouter / 薄荷 / 旧版站点）' },
@@ -350,7 +350,7 @@ export class RelayCheckinCore {
 
   async help() {
     const img = await renderHelp()
-    await this.replyImage(img, '帮助图渲染失败，指令：#中转添加 地址 / #中转添加cookie 地址 auth_token值（薄荷）/ #中转添加邮箱 地址（AgentRouter、Sub2API）/ #中转列表 / #中转删除 序号 / #中转签到 [序号] / #中转查询 / #中转定时 开|关 [序号]')
+    await this.replyImage(img, '帮助图渲染失败，指令：#中转添加 地址 / #中转添加cookie 地址 auth_token值（薄荷）/ #中转添加邮箱 地址（AgentRouter、Sub2API、apikey.casa）/ #中转列表 / #中转删除 序号 / #中转签到 [序号] / #中转查询 / #中转定时 开|关 [序号]')
     return true
   }
 
@@ -729,7 +729,9 @@ export class RelayCheckinCore {
       cookie: isMintHost(site.host)
         ? 'auth_token值（在浏览器登录该站点后按 F12，在 Application → Cookies 里复制 auth_token 的值）'
         : 'session值 用户ID（空格分隔；整串 Cookie 可整段粘贴）',
-      email: `邮箱 ${emailPasswordLabel(site)}（空格分隔）`,
+      email: isApikeyCasaSite(site)
+        ? '邮箱 登录密码（空格分隔；邮箱就是登录账号，无需填写站点用户ID）'
+        : `邮箱 ${emailPasswordLabel(site)}（空格分隔）`,
       // 站点没有可复制的「令牌」入口，必须告诉用户去哪取，否则根本无从下手
       refresh: '刷新令牌（在电脑浏览器登录该站点后按 F12，在 Console 执行：'
         + "localStorage.getItem('refresh_token') ，把 rt_ 开头的整串发来；取完请不要再刷新该站点页面)"
@@ -754,13 +756,18 @@ export class RelayCheckinCore {
   }
 
   /**
-   * #中转添加 地址            → 发起绑定，私聊补发令牌（推荐群内用法）
+   * #中转添加 地址            → 发起绑定，casa 私聊补发邮箱密码，其他站点补令牌
    * #中转添加 地址 令牌 [用户ID] → 直接添加（建议私聊使用）
    * 规则放宽到任意段数：参数过多时也能撤回消息并提示，避免令牌静默留在群里
    */
   async add() {
     const args = String(this.e.msg).trim().split(/\s+/).slice(1)
     const site = this.parseSite(args[0])
+
+    // casa 默认使用邮箱密码；显式传入 Auth token 的旧指令仍可使用。
+    if (isApikeyCasaSite(site) && (args.length === 1 || String(args[1] || '').includes('@'))) {
+      return this.addEmail()
+    }
 
     const specializedHint = specializedBindingHint(site)
     if (specializedHint) {
