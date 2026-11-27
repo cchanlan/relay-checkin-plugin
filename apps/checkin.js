@@ -480,10 +480,31 @@ export class RelayCheckinCore {
   }
 
   /**
-   * 邮箱登录校验。AgentRouter 与 Sub2API 都用「邮箱 + 站内密码」，但换到的凭据
-   * 完全不同（session cookie vs JWT），因此按站点类型分流。
+   * apikey.casa 邮箱登录只走专用鉴权，余额与首次签到继续使用专用接口。
    */
+  async verifyApikeyCasaEmail(site, loginEmail, password) {
+    const normalizedEmail = String(loginEmail || '').trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return { ok: false, msg: '邮箱格式不正确' }
+    if (!String(password || '')) return { ok: false, msg: '请输入登录密码' }
+    const account = {
+      name: site.host, baseUrl: site.baseUrl, type: 'apikeycasa', authMode: 'email',
+      loginEmail: normalizedEmail, password, token: '', accessToken: '', tokenExpiresAt: null,
+      siteUserId: null, signPath: null, auto: true
+    }
+    try {
+      const adapter = getAdapter('apikeycasa')
+      const login = await guardHang(adapter.login(account), '登录 apikey.casa')
+      if (!login.ok) return login
+      const info = await guardHang(adapter.userInfo(account), '读取 apikey.casa 账号信息')
+      if (!info.ok) return info
+      if (!info.siteUserId) return { ok: false, msg: 'apikey.casa 未返回账号信息，请稍后重试' }
+      account.siteUserId = info.siteUserId
+      return { ok: true, account, info }
+    } catch { return { ok: false, msg: 'apikey.casa 登录未完成，请稍后重试' } }
+  }
+
   async verifyEmail(site, loginEmail, password) {
+    if (isApikeyCasaSite(site)) return this.verifyApikeyCasaEmail(site, loginEmail, password)
     const restriction = bindingRestrictionForSite(site, 'email')
     if (restriction) return { ok: false, msg: restriction }
     if (cookieTypeForHost(site.host) !== 'agentrouter') {
@@ -499,6 +520,7 @@ export class RelayCheckinCore {
    * 由 saveAccount 的常规首签流程去签。
    */
   async verifySub2apiEmail(site, loginEmail, password, probe) {
+    if (isApikeyCasaSite(site)) return this.verifyApikeyCasaEmail(site, loginEmail, password)
     const restriction = bindingRestrictionForSite(site, 'email')
     if (restriction) return { ok: false, msg: restriction }
     const normalizedEmail = String(loginEmail || '').trim()
@@ -597,6 +619,7 @@ export class RelayCheckinCore {
    * 保存账号时直接复用，避免第二次登录覆盖“本次到账”状态。
    */
   async verifyAgentRouterEmail(site, loginEmail, password) {
+    if (isApikeyCasaSite(site)) return this.verifyApikeyCasaEmail(site, loginEmail, password)
     const restriction = bindingRestrictionForSite(site, 'email')
     if (restriction) return { ok: false, msg: restriction }
     const normalizedEmail = String(loginEmail || '').trim()
@@ -650,7 +673,7 @@ export class RelayCheckinCore {
     if (await this.rejectUnsupportedBinding(kind, site)) return
     // 薄荷没有站点用户ID，提示文案与 AnyRouter 不同（只贴一个 auth_token）
     const mintBind = kind === 'cookie' && isMintHost(site.host)
-    const fullCmd = isApikeyCasaSite(site)
+    const fullCmd = isApikeyCasaSite(site) && kind === 'token'
       ? '#中转添加 https://apikey.casa AuthToken值'
       : mintBind
       ? `#中转添加cookie ${site.host} auth_token值`
@@ -700,7 +723,7 @@ export class RelayCheckinCore {
     armBindTimeout(pending, timeoutSec)
     pendingBinds.set(key, pending)
 
-    const need = isApikeyCasaSite(site)
+    const need = isApikeyCasaSite(site) && kind === 'token'
       ? 'Auth token（浏览器登录后按 F12 → Network，打开 /api/v1/redeem/checkin 请求，复制 Authorization 的 Bearer 后面的值；不是 API Key，不要带 Bearer 前缀）'
       : {
       cookie: isMintHost(site.host)
@@ -871,7 +894,7 @@ export class RelayCheckinCore {
   }
 
   /**
-   * #中转添加邮箱 地址                → 发起邮箱绑定（AgentRouter / Sub2API）
+   * #中转添加邮箱 地址                → 发起邮箱绑定（AgentRouter / Sub2API / apikey.casa）
    * #中转添加邮箱 地址 邮箱 站内密码  → 直接添加（建议仅私聊使用）
    */
   async addEmail() {
@@ -884,11 +907,11 @@ export class RelayCheckinCore {
         await this.reply('站点地址格式不正确或被安全策略拒绝，例如：#中转添加邮箱 https://agentrouter.org')
         return true
       }
-      // 非 AgentRouter 域名时探测一次是否为 Sub2API，两者都不是就不该走邮箱绑定
-      if (cookieTypeForHost(site.host) !== 'agentrouter') {
+      // casa 已由官方域名识别；其他非 AgentRouter 站点再探测 Sub2API。
+      if (!isApikeyCasaSite(site) && cookieTypeForHost(site.host) !== 'agentrouter') {
         const probe = await probeSub2apiSite(site.baseUrl).catch(() => ({ ok: false }))
         if (!probe.ok) {
-          await this.reply('邮箱登录绑定仅用于 AgentRouter（agentrouter.org / *.air-outer.com）与 Sub2API 站点，其他站点请用 #中转添加 地址')
+          await this.reply('邮箱登录绑定仅用于 AgentRouter（agentrouter.org / *.air-outer.com）、Sub2API 与 apikey.casa 站点，其他站点请用 #中转添加 地址')
           return true
         }
       }

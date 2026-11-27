@@ -51,7 +51,7 @@ function createCore(msg = '', isGroup = false, userId = ++seq) {
 }
 function setMessage(c, text) { c.e.msg = text; c.e.raw_message = text }
 function assertHint(text) {
-  assert.match(text, /仅支持 Auth token/)
+  assert.match(text, /支持邮箱密码自动登录或 Auth token/)
   assert.match(text, /#中转添加 https:\/\/apikey\.casa AuthToken值/)
   assert.match(text, /F12.*Network.*Authorization/)
 }
@@ -80,8 +80,9 @@ try {
   await test('站点识别覆盖端口/FQDN且不误拦其他主机', async () => {
     for (const baseUrl of ['https://apikey.casa', 'https://APIKEY.CASA', 'https://apikey.casa:443', 'https://apikey.casa.']) {
       assert.equal(policy.isApikeyCasaSite({ baseUrl }), true)
-      for (const kind of ['email', 'cookie', 'refresh']) assertHint(policy.bindingRestrictionForSite({ baseUrl }, kind))
+      for (const kind of ['cookie', 'refresh']) assertHint(policy.bindingRestrictionForSite({ baseUrl }, kind))
       assert.equal(policy.bindingRestrictionForSite({ baseUrl }, 'token'), null)
+      assert.equal(policy.bindingRestrictionForSite({ baseUrl }, 'email'), null)
     }
     for (const baseUrl of ['https://apikey.casa.evil.test', 'https://fake-apikey.casa', 'https://sub2guard.test']) {
       assert.equal(policy.isApikeyCasaSite({ baseUrl }), false)
@@ -98,9 +99,9 @@ try {
     assert.deepEqual(calls, [])
   })
 
-  await test('邮箱/Cookie/刷新令牌入口：两种前缀、群私聊、简写完整参数全部拦截', async () => {
+  await test('Cookie/刷新令牌入口：两种前缀、群私聊、简写完整参数全部拦截', async () => {
     for (const prefix of ['#中转', '#中转站']) for (const isGroup of [false, true]) {
-      for (const [suffix, method, creds] of [['添加邮箱', 'addEmail', 'fake@example.test FAKE_PASSWORD'], ['添加cookie', 'addCookie', 'FAKE_COOKIE 7'], ['添加刷新令牌', 'addRefresh', 'rt_FAKE_REFRESH']]) {
+      for (const [suffix, method, creds] of [['添加cookie', 'addCookie', 'FAKE_COOKIE 7'], ['添加刷新令牌', 'addRefresh', 'rt_FAKE_REFRESH']]) {
         for (const tail of ['', ` ${creds}`]) {
           reset()
           const c = createCore(`${prefix}${suffix} ${SITE.baseUrl}${tail}`, isGroup)
@@ -115,15 +116,12 @@ try {
     }
   })
 
-  await test('底层验证函数直接调用也禁止邮箱/Cookie/refresh登录', async () => {
+  await test('底层验证函数直接调用也禁止Cookie/refresh登录', async () => {
     const c = createCore()
     const probe = { ok: true, siteName: 'fake' }
     reset()
     for (const fn of [
       () => c.core.verifyCookie(SITE, 'FAKE_COOKIE', 7),
-      () => c.core.verifyEmail(SITE, 'fake@example.test', 'FAKE_PASSWORD'),
-      () => c.core.verifySub2apiEmail(SITE, 'fake@example.test', 'FAKE_PASSWORD', probe),
-      () => c.core.verifyAgentRouterEmail(SITE, 'fake@example.test', 'FAKE_PASSWORD'),
       () => c.core.verifySub2apiRefresh(SITE, 'rt_FAKE_REFRESH', probe)
     ]) { const r = await fn(); assert.equal(r.ok, false); assertHint(r.msg) }
     assert.deepEqual(calls, [])
@@ -131,7 +129,7 @@ try {
   })
 
   await test('错误绑定不建立私聊会话，旧会话消费前也拦截', async () => {
-    for (const kind of ['email', 'cookie', 'refresh']) {
+    for (const kind of ['cookie', 'refresh']) {
       reset()
       const c = createCore()
       await c.core.startBind(kind, SITE)
@@ -233,7 +231,7 @@ try {
   })
 
   await test('旧错误类型签到/查询/列表刷新不登录、不发请求、不改变原凭据', async () => {
-    for (const [type,authMode] of [['sub2api','email'],['sub2api','refresh'],['generic','cookie'],['newapi','token'],['apikeycasa','email']]) {
+    for (const [type,authMode] of [['sub2api','email'],['sub2api','refresh'],['generic','cookie'],['newapi','token']]) {
       const account = { name: 'apikey.casa', baseUrl: SITE.baseUrl, type, authMode, token: TOKEN, accessToken: 'FAKE_ACCESS', password: 'FAKE_PASSWORD', lastBalance: '$9.00' }
       const before = { ...account }
       reset()

@@ -173,6 +173,7 @@ function logNonJsonResponse(method, targetUrl, response) {
 
 /**
  * 发起 JSON 请求（带超时与重试；命中代理配置的 https 站点走代理）
+ * sensitive=true 时隐藏传输异常原文，避免认证请求的异常回显凭据。
  * @param {object} opts { method, headers, body: JSON 对象或字符串,
  *                        timeoutMs: 覆盖配置超时, maxRetry: 覆盖配置重试次数,
  *                        retryStatuses: 命中这些状态码时重试（明确否定才重发）,
@@ -180,7 +181,7 @@ function logNonJsonResponse(method, targetUrl, response) {
  *                        retryBeforeSend: false 禁止非幂等请求的握手阶段重试 }
  * @returns {Promise<{status: number, json: object|null, setCookies: string[]}>}
  */
-export async function request(url, { method = 'GET', headers = {}, body = null, timeoutMs = null, maxRetry = null, retryStatuses = null, retryDelayMs = 0, retryBeforeSend = true } = {}) {
+export async function request(url, { method = 'GET', headers = {}, body = null, timeoutMs = null, maxRetry = null, retryStatuses = null, retryDelayMs = 0, retryBeforeSend = true, sensitive = false } = {}) {
   const cfg = getConfig()
   const tMs = timeoutMs ?? (cfg.request.timeout || 15) * 1000
   const normalizedMethod = String(method || 'GET').toUpperCase()
@@ -262,7 +263,7 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
         if (err?.preRequestFailure && preRequestRetriesUsed < preRequestRetries) {
           preRequestRetriesUsed++
           logger.info(`[relay-checkin-plugin] ${normalizedMethod} ${requestPathname(targetUrl)} 在请求发出前失败`
-            + `（${err?.message || err}），重试 ${preRequestRetriesUsed}/${preRequestRetries}`)
+            + `（${sensitive ? '网络连接失败' : (err?.message || err)}），重试 ${preRequestRetriesUsed}/${preRequestRetries}`)
           continue
         }
         if (transportRetriesUsed >= retries) break
@@ -322,8 +323,9 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
   }
   // 用户只会看到「连不上」这类人话，真实原因（超时/DNS/证书）只有这里留得住。
   // 只记 pathname：查询串里可能带一次性令牌。
-  logger.warn(`[relay-checkin-plugin] ${normalizedMethod} ${requestPathname(targetUrl)} 请求失败: ${lastErr?.message || lastErr}`)
-  throw new Error(`${normalizedMethod} 请求失败: ${friendlyTransportError(lastErr) || lastErr?.message || lastErr}`)
+  const detail = sensitive ? '网络连接失败，请稍后重试' : (lastErr?.message || String(lastErr))
+  logger.warn(`[relay-checkin-plugin] ${normalizedMethod} ${requestPathname(targetUrl)} 请求失败: ${detail}`)
+  throw new Error(`${normalizedMethod} 请求失败: ${sensitive ? detail : (friendlyTransportError(lastErr) || detail)}`)
 }
 
 /**

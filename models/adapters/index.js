@@ -27,7 +27,7 @@ const restrictedApikeyCasa = {
 /** 旧错误类型不能继续邮箱登录/续期或探测通用签到；保留条目，明确要求重绑。 */
 export function getAccountAdapter(account) {
   if (isApikeyCasaSite(account)) {
-    return account.type === 'apikeycasa' && (!account.authMode || account.authMode === 'token')
+    return account.type === 'apikeycasa' && (!account.authMode || ['token', 'email'].includes(account.authMode))
       ? apikeycasa : restrictedApikeyCasa
   }
   return getAdapter(account.type)
@@ -56,7 +56,7 @@ export function isMintHost(host) {
 /**
  * 需要专用凭据流程的站点：令牌入口不能正确完成 AnyRouter/AgentRouter 绑定。
  * 薄荷没有令牌与邮箱密码登录，只认 auth_token cookie，走令牌入口必然失败；
- * apikey.casa 只接受 token；普通 new-api/Veloera 返回 null，继续自动探测。
+ * apikey.casa 的令牌入口保留专用验证，邮箱入口独立登录；普通 new-api/Veloera 返回 null，继续自动探测。
  */
 export function preferredBindingForHost(host) {
   if (isApikeyCasaSite({ host })) return 'token'

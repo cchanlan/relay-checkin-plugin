@@ -1,20 +1,15 @@
 import { request } from './common.js'
+import { ensureCasaToken, casaRead, casaAuthFailed as authFailed, CASA_TOKEN_EXPIRED } from '../apikeycasa-auth.js'
 import { APIKEY_CASA_AUTH_HINT, isApikeyCasaAuthToken } from '../apikeycasa-policy.js'
 
 const CHECKIN_PATH = '/api/v1/redeem/checkin'
-const USER_INFO_PATH = '/api/v1/auth/me'
-const AUTH_HINT = 'Auth token 无效或已过期，请重新登录 apikey.casa 后更新 Auth token'
+const AUTH_HINT = CASA_TOKEN_EXPIRED
 const UNCERTAIN_HINT = '签到结果未确认，请刷新站点页面确认状态；不要连续重试'
 
 function checkinUrl(account) {
   return `${String(account.baseUrl || '').replace(/\/+$/, '')}${CHECKIN_PATH}`
 }
 
-function authFailed(res) {
-  const code = String(res.json?.code ?? '').toUpperCase()
-  return res.status === 401 || res.status === 403
-    || ['INVALID_TOKEN', 'UNAUTHORIZED', 'FORBIDDEN', 'TOKEN_EXPIRED'].includes(code)
-}
 
 function moneyAmount(value) {
   if (!['number', 'string'].includes(typeof value) || String(value).trim() === '') return null
@@ -33,6 +28,7 @@ function rewardText(amount) {
 }
 
 function parseStatus(res) {
+  if (res.authError) return { supported: true, ok: false, msg: res.authError }
   if (authFailed(res)) return { supported: true, ok: false, msg: AUTH_HINT }
   if (res.status < 200 || res.status >= 300 || res.json?.code !== 0) {
     // 不把任意站点 message 直接转发到结果图或日志，避免服务端回显凭据。
@@ -62,21 +58,25 @@ export default {
   checkinPath: CHECKIN_PATH,
 
   buildHeaders(account) {
-    return { Authorization: `Bearer ${account.token || ''}` }
+    return { Authorization: `Bearer ${(account.authMode === 'email' ? account.accessToken : account.token) || ''}` }
+  },
+
+  async login(account) {
+    return ensureCasaToken(account)
   },
 
   async userInfo(account) {
-    if ((account.authMode && account.authMode !== 'token') || !isApikeyCasaAuthToken(account.token)) {
+    if (account.authMode !== 'email' && ((account.authMode && account.authMode !== 'token') || !isApikeyCasaAuthToken(account.token))) {
       return { ok: false, msg: APIKEY_CASA_AUTH_HINT }
     }
     // 个人信息接口提供真实美元余额；余额查询不依赖签到接口，也不触发签到。
     let res
     try {
-      const base = String(account.baseUrl || '').replace(/\/+$/, '')
-      res = await request(`${base}${USER_INFO_PATH}`, { headers: this.buildHeaders(account) })
+      res = await casaRead(account, '/auth/me')
     } catch {
       return { ok: false, msg: '无法查询 apikey.casa 余额，请稍后重试' }
     }
+    if (res.authError) return { ok: false, msg: res.authError }
     if (authFailed(res)) return { ok: false, msg: AUTH_HINT }
     if (res.status < 200 || res.status >= 300 || res.json?.code !== 0) {
       return { ok: false, msg: `余额查询失败（HTTP ${res.status}），请稍后重试` }
@@ -99,11 +99,11 @@ export default {
   },
 
   async getCheckinStatus(account) {
-    if ((account.authMode && account.authMode !== 'token') || !isApikeyCasaAuthToken(account.token)) {
+    if (account.authMode !== 'email' && ((account.authMode && account.authMode !== 'token') || !isApikeyCasaAuthToken(account.token))) {
       return { supported: true, ok: false, msg: APIKEY_CASA_AUTH_HINT }
     }
     try {
-      return parseStatus(await request(checkinUrl(account), { headers: this.buildHeaders(account) }))
+      return parseStatus(await casaRead(account, '/redeem/checkin'))
     } catch {
       return { supported: true, ok: false, msg: '无法查询 apikey.casa 签到状态，请稍后重试' }
     }
@@ -122,7 +122,7 @@ export default {
     try {
       // 公开前端的领取请求不带 body。连请求发出前的代理握手重试也显式关闭。
       res = await request(checkinUrl(account), {
-        method: 'POST', headers: this.buildHeaders(account), maxRetry: 0, retryBeforeSend: false
+        method: 'POST', headers: this.buildHeaders(account), maxRetry: 0, retryBeforeSend: false, sensitive: true
       })
     } catch {
       // 请求可能已在站点成功；交给执行器只读复核，不能重复领取。
